@@ -7,7 +7,7 @@
 
 class shared_mutex;
 class cpu_thread;
-class notifier;
+class cond_x16;
 
 namespace vm
 {
@@ -53,7 +53,8 @@ namespace vm
 	extern thread_local atomic_t<cpu_thread*>* g_tls_locked;
 
 	// Register reader
-	bool passive_lock(cpu_thread& cpu, bool wait = true);
+	void passive_lock(cpu_thread& cpu);
+	atomic_t<u64>* passive_lock(const u32 begin, const u32 end);
 
 	// Unregister reader
 	void passive_unlock(cpu_thread& cpu);
@@ -80,14 +81,10 @@ namespace vm
 
 	struct writer_lock final
 	{
-		const bool locked;
-
 		writer_lock(const writer_lock&) = delete;
 		writer_lock& operator=(const writer_lock&) = delete;
-		writer_lock(int full);
+		writer_lock(u32 addr = 0);
 		~writer_lock();
-
-		explicit operator bool() const { return locked; }
 	};
 
 	// Get reservation status for further atomic update: last update timestamp
@@ -101,13 +98,13 @@ namespace vm
 	inline void reservation_update(u32 addr, u32 size, bool lsb = false)
 	{
 		// Update reservation info with new timestamp
-		reservation_acquire(addr, size) = (__rdtsc() << 1) | u64{lsb};
+		reservation_acquire(addr, size) += 2;
 	}
 
 	// Get reservation sync variable
-	inline notifier& reservation_notifier(u32 addr, u32 size)
+	inline cond_x16& reservation_notifier(u32 addr, u32 size)
 	{
-		return *reinterpret_cast<notifier*>(g_reservations2 + addr / 128 * 8);
+		return *reinterpret_cast<cond_x16*>(g_reservations2 + addr / 128 * 8);
 	}
 
 	void reservation_lock_internal(atomic_t<u64>&);
@@ -146,7 +143,7 @@ namespace vm
 	class block_t final
 	{
 		// Mapped regions: addr -> shm handle
-		std::map<u32, std::shared_ptr<utils::shm>> m_map;
+		std::map<u32, std::pair<u32, std::shared_ptr<utils::shm>>> m_map;
 
 		// Common mapped region for special cases
 		std::shared_ptr<utils::shm> m_common;
@@ -164,16 +161,16 @@ namespace vm
 		const u64 flags; // Currently unused
 
 		// Search and map memory (min alignment is 0x10000)
-		u32 alloc(u32 size, u32 align = 0x10000, const std::shared_ptr<utils::shm>* = nullptr);
+		u32 alloc(u32 size, u32 align = 0x10000, const std::shared_ptr<utils::shm>* = nullptr, u64 flags = 0);
 
 		// Try to map memory at fixed location
-		u32 falloc(u32 addr, u32 size, const std::shared_ptr<utils::shm>* = nullptr);
+		u32 falloc(u32 addr, u32 size, const std::shared_ptr<utils::shm>* = nullptr, u64 flags = 0);
 
 		// Unmap memory at specified location previously returned by alloc(), return size
 		u32 dealloc(u32 addr, const std::shared_ptr<utils::shm>* = nullptr);
 
 		// Get memory at specified address (if size = 0, addr assumed exact)
-		std::pair<const u32, std::shared_ptr<utils::shm>> get(u32 addr, u32 size = 0);
+		std::pair<u32, std::shared_ptr<utils::shm>> get(u32 addr, u32 size = 0);
 
 		// Internal
 		u32 imp_used(const vm::writer_lock&);
@@ -192,7 +189,7 @@ namespace vm
 	std::shared_ptr<block_t> unmap(u32 addr, bool must_be_empty = false);
 
 	// Get memory block associated with optionally specified memory location or optionally specified address
-	std::shared_ptr<block_t> get(memory_location_t location, u32 addr = 0);
+	std::shared_ptr<block_t> get(memory_location_t location, u32 addr = 0, u32 area_size = 0);
 
 	// Get PS3/PSV virtual memory address from the provided pointer (nullptr always converted to 0)
 	inline vm::addr_t get_addr(const void* real_ptr)

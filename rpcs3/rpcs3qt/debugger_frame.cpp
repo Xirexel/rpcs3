@@ -54,7 +54,7 @@ debugger_frame::debugger_frame(std::shared_ptr<gui_settings> settings, QWidget *
 	m_btn_step_over = new QPushButton(tr("Step Over"), this);
 	m_btn_run = new QPushButton(RunString, this);
 
-	EnableButtons(!Emu.IsStopped());
+	EnableButtons(false);
 
 	ChangeColors();
 
@@ -198,7 +198,7 @@ void debugger_frame::keyPressEvent(QKeyEvent* event)
 	const auto cpu = this->cpu.lock();
 	int i = m_debugger_list->currentRow();
 
-	if (!isActiveWindow() || i < 0 || !cpu)
+	if (!isActiveWindow() || i < 0 || !cpu || m_no_thread_selected)
 	{
 		return;
 	}
@@ -248,7 +248,6 @@ void debugger_frame::keyPressEvent(QKeyEvent* event)
 	}
 }
 
-
 u32 debugger_frame::GetPc() const
 {
 	const auto cpu = this->cpu.lock();
@@ -258,7 +257,7 @@ u32 debugger_frame::GetPc() const
 		return 0;
 	}
 
-	return cpu->id_type() == 1 ? static_cast<ppu_thread*>(cpu.get())->cia : static_cast<SPUThread*>(cpu.get())->pc;
+	return cpu->id_type() == 1 ? static_cast<ppu_thread*>(cpu.get())->cia : static_cast<spu_thread*>(cpu.get())->pc;
 }
 
 void debugger_frame::UpdateUI()
@@ -276,11 +275,11 @@ void debugger_frame::UpdateUI()
 			m_last_pc = -1;
 			m_last_stat = 0;
 			DoUpdate();
-
-			m_btn_run->setEnabled(false);
-			m_btn_step->setEnabled(false);
-			m_btn_step_over->setEnabled(false);
 		}
+
+		m_btn_run->setEnabled(false);
+		m_btn_step->setEnabled(false);
+		m_btn_step_over->setEnabled(false);
 	}
 	else
 	{
@@ -340,9 +339,8 @@ void debugger_frame::UpdateUnitList()
 	{
 		const QSignalBlocker blocker(m_choice_units);
 
-		idm::select<ppu_thread>(on_select);
-		idm::select<RawSPUThread>(on_select);
-		idm::select<SPUThread>(on_select);
+		idm::select<named_thread<ppu_thread>>(on_select);
+		idm::select<named_thread<spu_thread>>(on_select);
 	}
 
 	OnSelectUnit();
@@ -369,26 +367,24 @@ void debugger_frame::OnSelectUnit()
 			return data == &cpu;
 		};
 
-		if (auto ppu = idm::select<ppu_thread>(on_select))
+		if (auto ppu = idm::select<named_thread<ppu_thread>>(on_select))
 		{
 			m_disasm = std::make_unique<PPUDisAsm>(CPUDisAsm_InterpreterMode);
 			cpu = ppu.ptr;
 		}
-		else if (auto spu1 = idm::select<SPUThread>(on_select))
+		else if (auto spu1 = idm::select<named_thread<spu_thread>>(on_select))
 		{
 			m_disasm = std::make_unique<SPUDisAsm>(CPUDisAsm_InterpreterMode);
 			cpu = spu1.ptr;
 		}
-		else if (auto rspu = idm::select<RawSPUThread>(on_select))
-		{
-			m_disasm = std::make_unique<SPUDisAsm>(CPUDisAsm_InterpreterMode);
-			cpu = rspu.ptr;
-		}
 	}
+
+	EnableButtons(!m_no_thread_selected);
 
 	m_debugger_list->UpdateCPUData(this->cpu, m_disasm);
 	m_breakpoint_list->UpdateCPUData(this->cpu, m_disasm);
 	DoUpdate();
+	UpdateUI();
 }
 
 void debugger_frame::DoUpdate()
@@ -466,7 +462,7 @@ void debugger_frame::ShowGotoAddressDialog()
 	if (cpu)
 	{
 		unsigned long pc = cpu ? GetPc() : 0x0;
-		address_preview_label->setText("Address: " + QString("0x%1").arg(pc, 8, 16, QChar('0')));
+		address_preview_label->setText(QString("Address: 0x%1").arg(pc, 8, 16, QChar('0')));
 		expression_input->setPlaceholderText(QString("0x%1").arg(pc, 8, 16, QChar('0')));
 	}
 	else
@@ -475,16 +471,16 @@ void debugger_frame::ShowGotoAddressDialog()
 		address_preview_label->setText("Address: 0x00000000");
 	}
 
-	auto l_changeLabel = [=]()
+	auto l_changeLabel = [&](const QString& text)
 	{
-		if (expression_input->text().isEmpty())
+		if (text.isEmpty())
 		{
 			address_preview_label->setText("Address: " + expression_input->placeholderText());
 		}
 		else
 		{
-			ulong ul_addr = EvaluateExpression(expression_input->text());
-			address_preview_label->setText("Address: " + QString("0x%1").arg(ul_addr, 8, 16, QChar('0')));
+			ulong ul_addr = EvaluateExpression(text);
+			address_preview_label->setText(QString("Address: 0x%1").arg(ul_addr, 8, 16, QChar('0')));
 		}
 	};
 
@@ -518,6 +514,8 @@ u64 debugger_frame::EvaluateExpression(const QString& expression)
 {
 	auto thread = cpu.lock();
 
+	if (!thread) return 0;
+
 	// Parse expression
 	QJSEngine scriptEngine;
 	scriptEngine.globalObject().setProperty("pc", GetPc());
@@ -540,7 +538,7 @@ u64 debugger_frame::EvaluateExpression(const QString& expression)
 	}
 	else
 	{
-		auto spu = static_cast<SPUThread*>(thread.get());
+		auto spu = static_cast<spu_thread*>(thread.get());
 
 		for (int i = 0; i < 128; ++i)
 		{
@@ -551,7 +549,8 @@ u64 debugger_frame::EvaluateExpression(const QString& expression)
 		}
 	}
 
-	return static_cast<ulong>(scriptEngine.evaluate(expression).toNumber());
+	const QString fixed_expression = QRegExp("^[A-Fa-f0-9]+$").exactMatch(expression) ? "0x" + expression : expression;
+	return static_cast<ulong>(scriptEngine.evaluate(fixed_expression).toNumber());
 }
 
 void debugger_frame::ClearBreakpoints()
@@ -610,6 +609,8 @@ void debugger_frame::EnableUpdateTimer(bool enable)
 
 void debugger_frame::EnableButtons(bool enable)
 {
+	if (m_no_thread_selected) enable = false;
+
 	m_go_to_addr->setEnabled(enable);
 	m_go_to_pc->setEnabled(enable);
 	m_btn_step->setEnabled(enable);

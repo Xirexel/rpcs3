@@ -8,7 +8,7 @@ export LD_LIBRARY_PATH=$QT_BASE_DIR/lib/x86_64-linux-gnu:$QT_BASE_DIR/lib
 
 cd rpcs3
 
-git submodule update --quiet --init asmjit 3rdparty/ffmpeg 3rdparty/pugixml 3rdparty/GSL 3rdparty/libpng 3rdparty/cereal 3rdparty/hidapi 3rdparty/xxHash 3rdparty/yaml-cpp Vulkan/glslang
+git submodule update --quiet --init asmjit 3rdparty/ffmpeg 3rdparty/pugixml 3rdparty/GSL 3rdparty/libpng 3rdparty/cereal 3rdparty/hidapi 3rdparty/xxHash 3rdparty/yaml-cpp 3rdparty/libusb Vulkan/glslang
 
 # Download pre-compiled llvm libs
 curl -sLO https://github.com/RPCS3/llvm/releases/download/continuous-linux-master/llvmlibs-linux.tar.gz
@@ -32,4 +32,4 @@ ninja
 
 cd ..
 # If it compiled succesfully let's deploy
-if [ $? -eq 0 ] && [ -n "$UPLOAD_URL" ] && [ "$TRAVIS_BRANCH" = "master" ]  && [ "$TRAVIS_PULL_REQUEST" = false ]; then /bin/bash -ex .travis/deploy-linux.bash ; fi
+if [ $? -eq 0 ] && [ -n "$GITHUB_TOKEN" ] && [ "$TRAVIS_BRANCH" = "master" ] && [ "$TRAVIS_PULL_REQUEST" = false ]; then /bin/bash -ex .travis/deploy-linux.bash ; fi

@@ -1,4 +1,4 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "Utilities/bin_patch.h"
 #include "Emu/Memory/vm.h"
 #include "Emu/System.h"
@@ -10,6 +10,7 @@
 #include "Emu/Cell/PPUAnalyser.h"
 #include "Emu/Cell/SPUThread.h"
 #include "Emu/Cell/RawSPUThread.h"
+#include "Emu/Cell/lv2/sys_memory.h"
 #include "Emu/Cell/lv2/sys_sync.h"
 #include "Emu/Cell/lv2/sys_prx.h"
 #include "Emu/Cell/lv2/sys_rsx.h"
@@ -39,6 +40,7 @@
 #include "Utilities/GDBDebugServer.h"
 
 #include "Utilities/sysinfo.h"
+#include "Utilities/JIT.h"
 
 #if defined(_WIN32) || defined(HAVE_VULKAN)
 #include "Emu/RSX/VK/VulkanAPI.h"
@@ -98,6 +100,7 @@ void fmt_class_string<pad_handler>::format(std::string& out, u64 arg)
 		{
 		case pad_handler::null: return "Null";
 		case pad_handler::keyboard: return "Keyboard";
+		case pad_handler::ds3: return "DualShock 3";
 		case pad_handler::ds4: return "DualShock 4";
 #ifdef _WIN32
 		case pad_handler::xinput: return "XInput";
@@ -257,11 +260,28 @@ void fmt_class_string<tsx_usage>::format(std::string& out, u64 arg)
 	});
 }
 
+template <>
+void fmt_class_string<enter_button_assign>::format(std::string& out, u64 arg)
+{
+	format_enum(out, arg, [](enter_button_assign value)
+	{
+		switch (value)
+		{
+		case enter_button_assign::circle: return "Enter with circle";
+		case enter_button_assign::cross: return "Enter with cross";
+		}
+
+		return unknown;
+	});
+}
+
 void Emulator::Init()
 {
+	jit_runtime::initialize();
+
 	if (!g_tty)
 	{
-		g_tty.open(fs::get_config_dir() + "TTY.log", fs::rewrite + fs::append);
+		g_tty.open(fs::get_cache_dir() + "TTY.log", fs::rewrite + fs::append);
 	}
 
 	idm::init();
@@ -275,12 +295,14 @@ void Emulator::Init()
 	// Reload global configuration
 	g_cfg.from_string(fs::file(fs::get_config_dir() + "/config.yml", fs::read + fs::create).to_string());
 
-	// Create directories
+	// Create directories (can be disabled if necessary)
 	const std::string emu_dir = GetEmuDir();
 	const std::string dev_hdd0 = GetHddDir();
 	const std::string dev_hdd1 = fmt::replace_all(g_cfg.vfs.dev_hdd1, "$(EmulatorDir)", emu_dir);
 	const std::string dev_usb = fmt::replace_all(g_cfg.vfs.dev_usb000, "$(EmulatorDir)", emu_dir);
 
+	if (g_cfg.vfs.init_dirs)
+	{
 	fs::create_path(dev_hdd0);
 	fs::create_path(dev_hdd1);
 	fs::create_path(dev_usb);
@@ -299,8 +321,9 @@ void Emulator::Init()
 	fs::create_dir(dev_hdd0 + "savedata/vmc/");
 	fs::create_dir(dev_hdd1 + "cache/");
 	fs::create_dir(dev_hdd1 + "game/");
+	}
 
-	fs::create_path(fs::get_config_dir() + "shaderlog/");
+	fs::create_path(fs::get_cache_dir() + "shaderlog/");
 	fs::create_path(fs::get_config_dir() + "captures/");
 
 #ifdef WITH_GDB_DEBUGGER
@@ -341,7 +364,7 @@ void Emulator::Init()
 
 				Emu.CallAfter([=]()
 				{
-					dlg->Create(+g_progr);
+					dlg->Create(+g_progr, +g_progr);
 				});
 
 				u64 ftotal = 0;
@@ -433,6 +456,18 @@ const bool Emulator::SetUsr(const std::string& user)
 	return true;
 }
 
+std::string Emulator::PPUCache() const
+{
+	const auto _main = fxm::check_unlocked<ppu_module>();
+
+	if (!_main || _main->cache.empty())
+	{
+		fmt::throw_exception("PPU Cache location not initialized.");
+	}
+
+	return _main->cache;
+}
+
 bool Emulator::BootRsxCapture(const std::string& path)
 {
 	if (!fs::is_file(path))
@@ -457,6 +492,7 @@ bool Emulator::BootRsxCapture(const std::string& path)
 	}
 
 	Init();
+	g_cfg.video.disable_on_disk_shader_cache.set(true);
 
 	vm::init();
 
@@ -465,20 +501,98 @@ bool Emulator::BootRsxCapture(const std::string& path)
 	GetCallbacks().on_ready();
 
 	auto gsrender = fxm::import<GSRender>(Emu.GetCallbacks().get_gs_render);
-	if (gsrender.get() == nullptr)
+	auto padhandler = fxm::import<pad_thread>(Emu.GetCallbacks().get_pad_handler);
+
+	if (gsrender.get() == nullptr || padhandler.get() == nullptr)
 		return false;
 
 	GetCallbacks().on_run();
 	m_state = system_state::running;
 
-	auto&& rsxcapture = idm::make_ptr<ppu_thread, rsx::rsx_replay_thread>(std::move(frame));
-	rsxcapture->run();
+	fxm::make<named_thread<rsx::rsx_replay_thread>>("RSX Replay", std::move(frame));
 
 	return true;
 }
 
-bool Emulator::BootGame(const std::string& path, bool direct, bool add_only)
+void Emulator::LimitCacheSize()
 {
+	const std::string cache_location = Emulator::GetHdd1Dir() + "/cache";
+	if (!fs::is_dir(cache_location))
+	{
+		LOG_WARNING(GENERAL, "Cache does not exist (%s)", cache_location);
+		return;
+	}
+
+	const u64 size = fs::get_dir_size(cache_location);
+	const u64 max_size = static_cast<u64>(g_cfg.vfs.cache_max_size) * 1024 * 1024;
+
+	if (max_size == 0) // Everything must go, so no need to do checks
+	{
+		fs::remove_all(cache_location, false);
+		LOG_SUCCESS(GENERAL, "Cleared disk cache");
+		return;
+	}
+
+	if (size <= max_size)
+	{
+		LOG_TRACE(GENERAL, "Cache size below limit: %llu/%llu", size, max_size);
+		return;
+	}
+
+	LOG_SUCCESS(GENERAL, "Cleaning disk cache...");
+	std::vector<fs::dir_entry> file_list{};
+	fs::dir cache_dir{};
+	if (!cache_dir.open(cache_location))
+	{
+		LOG_ERROR(GENERAL, "Could not open cache directory");
+		return;
+	}
+
+	// retrieve items to delete
+	for (const auto &item : cache_dir)
+	{
+		if (item.name != "." && item.name != "..")
+			file_list.push_back(item);
+	}
+	cache_dir.close();
+
+	// sort oldest first
+	std::sort(file_list.begin(), file_list.end(), [](auto left, auto right)
+	{
+		return left.mtime < right.mtime;
+	});
+
+	// keep removing until cache is empty or enough bytes have been cleared
+	// cache is cleared down to 80% of limit to increase interval between clears
+	const u64 to_remove = static_cast<u64>(size - max_size * 0.8);
+	u64 removed = 0;
+	for (const auto &item : file_list)
+	{
+		const std::string &name = cache_location + "/" + item.name;
+		const u64 item_size = fs::is_dir(name) ? fs::get_dir_size(name) : item.size;
+
+		if (fs::is_dir(name))
+		{
+			fs::remove_all(name, true);
+		}
+		else
+		{
+			fs::remove_file(name);
+		}
+
+		removed += item_size;
+		if (removed >= to_remove)
+			break;
+	}
+
+	LOG_SUCCESS(GENERAL, "Cleaned disk cache, removed %.2f MB", size / 1024.0 / 1024.0);
+}
+
+bool Emulator::BootGame(const std::string& path, bool direct, bool add_only, bool force_global_config)
+{
+	if (g_cfg.vfs.limit_cache_size)
+		LimitCacheSize();
+
 	static const char* boot_list[] =
 	{
 		"/PS3_GAME/USRDIR/EBOOT.BIN",
@@ -491,7 +605,7 @@ bool Emulator::BootGame(const std::string& path, bool direct, bool add_only)
 	if (direct && fs::exists(path))
 	{
 		m_path = path;
-		Load(add_only);
+		Load(add_only, force_global_config);
 		return true;
 	}
 
@@ -502,7 +616,7 @@ bool Emulator::BootGame(const std::string& path, bool direct, bool add_only)
 		if (fs::is_file(elf))
 		{
 			m_path = elf;
-			Load(add_only);
+			Load(add_only, force_global_config);
 			return true;
 		}
 	}
@@ -554,12 +668,64 @@ std::string Emulator::GetHddDir()
 	return fmt::replace_all(g_cfg.vfs.dev_hdd0, "$(EmulatorDir)", GetEmuDir());
 }
 
+std::string Emulator::GetHdd1Dir()
+{
+	return fmt::replace_all(g_cfg.vfs.dev_hdd1, "$(EmulatorDir)", GetEmuDir());
+}
+
+std::string Emulator::GetSfoDirFromGamePath(const std::string& game_path, const std::string& user)
+{
+	if (fs::is_file(game_path + "/PS3_DISC.SFB"))
+	{
+		// This is a disc game.
+		return game_path + "/PS3_GAME";
+	}
+
+	const auto psf = psf::load_object(fs::file(game_path + "/PARAM.SFO"));
+
+	const std::string category   = get_string(psf, "CATEGORY");
+	const std::string content_id = get_string(psf, "CONTENT_ID");
+	if (category == "HG" && !content_id.empty())
+	{
+		// This is a trial game. Check if the user has a RAP file to unlock it.
+		const std::string rap_path = GetHddDir() + "home/" + user + "/exdata/" + content_id + ".rap";
+		if (fs::is_file(rap_path) && fs::is_file(game_path + "/C00/PARAM.SFO"))
+		{
+			// Load full game data.
+			return game_path + "/C00";
+		}
+	}
+
+	return game_path;
+}
+
+std::string Emulator::GetCustomConfigDir()
+{
+#ifdef _WIN32
+	return fs::get_config_dir() + "config/custom_configs/";
+#else
+	return fs::get_config_dir() + "custom_configs/";
+#endif
+}
+
+std::string Emulator::GetCustomConfigPath(const std::string& title_id, bool get_deprecated_path)
+{
+	std::string path;
+
+	if (get_deprecated_path)
+		path = fs::get_config_dir() + "data/" + title_id + "/config.yml";
+	else
+		path = GetCustomConfigDir() + "config_" + title_id + ".yml";
+
+	return path;
+}
+
 void Emulator::SetForceBoot(bool force_boot)
 {
 	m_force_boot = force_boot;
 }
 
-void Emulator::Load(bool add_only)
+void Emulator::Load(bool add_only, bool force_global_config)
 {
 	if (!IsStopped())
 	{
@@ -583,42 +749,43 @@ void Emulator::Load(bool add_only)
 		const std::string elf_dir = fs::get_parent_dir(m_path);
 
 		// Load PARAM.SFO (TODO)
-		const auto _psf = psf::load_object([&]() -> fs::file
+		psf::registry _psf;
+		if (fs::file sfov{elf_dir + "/sce_sys/param.sfo"})
 		{
-			if (fs::file sfov{elf_dir + "/sce_sys/param.sfo"})
-			{
-				return sfov;
-			}
-
+			m_sfo_dir = elf_dir;
+			_psf = psf::load_object(sfov);
+		}
+		else
+		{
 			if (fs::is_dir(m_path))
 			{
 				// Special case (directory scan)
-				if (fs::file sfo{m_path + "/PS3_GAME/PARAM.SFO"})
-				{
-					return sfo;
-				}
-
-				return fs::file{m_path + "/PARAM.SFO"};
+				m_sfo_dir = GetSfoDirFromGamePath(m_path, GetUsr());
 			}
-
-			if (disc.size())
+			else if (disc.size())
 			{
 				// Check previously used category before it's overwritten
 				if (m_cat == "DG")
 				{
-					return fs::file{disc + "/PS3_GAME/PARAM.SFO"};
+					m_sfo_dir = disc + "/PS3_GAME";
 				}
-
-				if (m_cat == "GD")
+				else if (m_cat == "GD")
 				{
-					return fs::file{GetHddDir() + "game/" + m_title_id + "/PARAM.SFO"};
+					m_sfo_dir = GetHddDir() + "game/" + m_title_id;
 				}
-
-				return fs::file{disc + "/PARAM.SFO"};
+				else
+				{
+					m_sfo_dir = GetSfoDirFromGamePath(disc, GetUsr());
+				}
+			}
+			else
+			{
+				m_sfo_dir = GetSfoDirFromGamePath(elf_dir + "/../", GetUsr());
 			}
 
-			return fs::file{elf_dir + "/../PARAM.SFO"};
-		}());
+			_psf = psf::load_object(fs::file(m_sfo_dir + "/PARAM.SFO"));
+		}
+
 		m_title = psf::get_string(_psf, "TITLE", m_path.substr(m_path.find_last_of('/') + 1));
 		m_title_id = psf::get_string(_psf, "TITLE_ID");
 		m_cat = psf::get_string(_psf, "CATEGORY");
@@ -640,37 +807,31 @@ void Emulator::Load(bool add_only)
 		LOG_NOTICE(LOADER, "Serial: %s", GetTitleID());
 		LOG_NOTICE(LOADER, "Category: %s", GetCat());
 
-		// Initialize data/cache directory
-		if (fs::is_dir(m_path))
+		if (!force_global_config)
 		{
-			m_cache_path = fs::get_config_dir() + "data/" + GetTitleID() + '/';
-			LOG_NOTICE(LOADER, "Cache: %s", GetCachePath());
-		}
-		else
-		{
-			m_cache_path = fs::get_data_dir(m_title_id, m_path);
-			LOG_NOTICE(LOADER, "Cache: %s", GetCachePath());
-		}
+			const std::string config_path_new = GetCustomConfigPath(m_title_id);
+			const std::string config_path_old = GetCustomConfigPath(m_title_id, true);
 
-		// Load custom config-0
-		if (fs::file cfg_file{m_cache_path + "/config.yml"})
-		{
-			LOG_NOTICE(LOADER, "Applying custom config: %s/config.yml", m_cache_path);
-			g_cfg.from_string(cfg_file.to_string());
-		}
+			// Load custom config-1
+			if (fs::file cfg_file{ config_path_old })
+			{
+				LOG_NOTICE(LOADER, "Applying custom config: %s", config_path_old);
+				g_cfg.from_string(cfg_file.to_string());
+			}
 
-		// Load custom config-1
-		if (fs::file cfg_file{fs::get_config_dir() + "data/" + m_title_id + "/config.yml"})
-		{
-			LOG_NOTICE(LOADER, "Applying custom config: data/%s/config.yml", m_title_id);
-			g_cfg.from_string(cfg_file.to_string());
-		}
+			// Load custom config-2
+			if (fs::file cfg_file{ config_path_new })
+			{
+				LOG_NOTICE(LOADER, "Applying custom config: %s", config_path_new);
+				g_cfg.from_string(cfg_file.to_string());
+			}
 
-		// Load custom config-2
-		if (fs::file cfg_file{m_path + ".yml"})
-		{
-			LOG_NOTICE(LOADER, "Applying custom config: %s.yml", m_path);
-			g_cfg.from_string(cfg_file.to_string());
+			// Load custom config-3
+			if (fs::file cfg_file{ m_path + ".yml" })
+			{
+				LOG_NOTICE(LOADER, "Applying custom config: %s.yml", m_path);
+				g_cfg.from_string(cfg_file.to_string());
+			}
 		}
 
 #if defined(_WIN32) || defined(HAVE_VULKAN)
@@ -691,7 +852,6 @@ void Emulator::Load(bool add_only)
 
 		// Load patches from different locations
 		fxm::check_unlocked<patch_engine>()->append(fs::get_config_dir() + "data/" + m_title_id + "/patch.yml");
-		fxm::check_unlocked<patch_engine>()->append(m_cache_path + "/patch.yml");
 
 		// Mount all devices
 		const std::string emu_dir = GetEmuDir();
@@ -721,7 +881,7 @@ void Emulator::Load(bool add_only)
 			// Workaround for analyser glitches
 			vm::falloc(0x10000, 0xf0000, vm::main);
 
-			return thread_ctrl::make_shared("SPRX Loader", [this]
+			return thread_ctrl::spawn("SPRX Loader", [this]
 			{
 				std::vector<std::string> dir_queue;
 				dir_queue.emplace_back(m_path + '/');
@@ -729,7 +889,7 @@ void Emulator::Load(bool add_only)
 				std::vector<std::pair<std::string, u64>> file_queue;
 				file_queue.reserve(2000);
 
-				std::queue<std::shared_ptr<thread_base>> thread_queue;
+				std::queue<named_thread<std::function<void()>>> thread_queue;
 				const uint max_threads = std::thread::hardware_concurrency();
 
 				// Initialize progress dialog
@@ -777,6 +937,8 @@ void Emulator::Load(bool add_only)
 					}
 				}
 
+				g_progr = "Compiling PPU modules";
+
 				for (std::size_t i = 0; i < file_queue.size(); i++)
 				{
 					const auto& path = file_queue[i].first;
@@ -803,12 +965,12 @@ void Emulator::Load(bool add_only)
 								std::this_thread::sleep_for(10ms);
 							}
 
-							thread_queue.emplace(thread_ctrl::make_shared("Worker " + std::to_string(thread_queue.size()), [_prx = std::move(prx)]
+							thread_queue.emplace("Worker " + std::to_string(thread_queue.size()), [_prx = std::move(prx)]
 							{
 								ppu_initialize(*_prx);
 								ppu_unload_prx(*_prx);
 								g_progr_fdone++;
-							}));
+							});
 
 							continue;
 						}
@@ -829,7 +991,7 @@ void Emulator::Load(bool add_only)
 				{
 					Emu.Stop();
 				});
-			})->detach();
+			});
 		}
 
 		// Detect boot location
@@ -934,8 +1096,6 @@ void Emulator::Load(bool add_only)
 			card_1_file.trunc(128 * 1024);
 			fs::file card_2_file(vfs::get("/dev_hdd0/savedata/vmc/" + argv[2]), fs::write + fs::create);
 			card_2_file.trunc(128 * 1024);
-
-			m_cache_path = fs::get_data_dir("", vfs::get(argv[0]));
 		}
 		else if (m_cat != "DG" && m_cat != "GD")
 		{
@@ -1067,20 +1227,23 @@ void Emulator::Load(bool add_only)
 		// Check SELF header
 		if (elf_file.size() >= 4 && elf_file.read<u32>() == "SCE\0"_u32)
 		{
-			const std::string decrypted_path = m_cache_path + "boot.elf";
+			const std::string decrypted_path = "boot.elf";
 
 			fs::stat_t encrypted_stat = elf_file.stat();
 			fs::stat_t decrypted_stat;
 
 			// Check modification time and try to load decrypted ELF
-			if (fs::stat(decrypted_path, decrypted_stat) && decrypted_stat.mtime == encrypted_stat.mtime)
+			if (false && fs::stat(decrypted_path, decrypted_stat) && decrypted_stat.mtime == encrypted_stat.mtime)
 			{
 				elf_file.open(decrypted_path);
 			}
 			// Decrypt SELF
 			else if (elf_file = decrypt_self(std::move(elf_file), klic.empty() ? nullptr : klic.data()))
 			{
-				if (fs::file elf_out{decrypted_path, fs::rewrite})
+				if (true)
+				{
+				}
+				else if (fs::file elf_out{decrypted_path, fs::rewrite})
 				{
 					elf_out.write(elf_file.to_vector<u8>());
 					elf_out.close();
@@ -1149,7 +1312,30 @@ void Emulator::Load(bool add_only)
 
 			ppu_load_exec(ppu_exec);
 
+			const auto _main = fxm::get<ppu_module>();
+
+			_main->cache = fs::get_cache_dir() + "cache/";
+
+			if (!m_title_id.empty() && m_cat != "1P")
+			{
+				// TODO
+				_main->cache += Emu.GetTitleID();
+				_main->cache += '/';
+			}
+
+			fmt::append(_main->cache, "ppu-%s-%s/", fmt::base57(_main->sha1), _main->path.substr(_main->path.find_last_of('/') + 1));
+
+			if (!fs::create_path(_main->cache))
+			{
+				fmt::throw_exception("Failed to create cache directory: %s (%s)", _main->cache, fs::g_tls_error);
+			}
+			else
+			{
+				LOG_NOTICE(LOADER, "Cache: %s", _main->cache);
+			}
+
 			fxm::import<GSRender>(Emu.GetCallbacks().get_gs_render); // TODO: must be created in appropriate sys_rsx syscall
+			fxm::import<pad_thread>(Emu.GetCallbacks().get_pad_handler);
 			network_thread_init();
 		}
 		else if (ppu_prx.open(elf_file) == elf_error::ok)
@@ -1220,12 +1406,12 @@ void Emulator::Run()
 
 	auto on_select = [](u32, cpu_thread& cpu)
 	{
-		cpu.run();
+		cpu.state -= cpu_flag::stop;
+		cpu.notify();
 	};
 
-	idm::select<ppu_thread>(on_select);
-	idm::select<RawSPUThread>(on_select);
-	idm::select<SPUThread>(on_select);
+	idm::select<named_thread<ppu_thread>>(on_select);
+	idm::select<named_thread<spu_thread>>(on_select);
 
 #ifdef WITH_GDB_DEBUGGER
 	// Initialize debug server at the end of emu run sequence
@@ -1256,9 +1442,8 @@ bool Emulator::Pause()
 		cpu.state += cpu_flag::dbg_global_pause;
 	};
 
-	idm::select<ppu_thread>(on_select);
-	idm::select<RawSPUThread>(on_select);
-	idm::select<SPUThread>(on_select);
+	idm::select<named_thread<ppu_thread>>(on_select);
+	idm::select<named_thread<spu_thread>>(on_select);
 	return true;
 }
 
@@ -1321,9 +1506,8 @@ void Emulator::Resume()
 		cpu.notify();
 	};
 
-	idm::select<ppu_thread>(on_select);
-	idm::select<RawSPUThread>(on_select);
-	idm::select<SPUThread>(on_select);
+	idm::select<named_thread<ppu_thread>>(on_select);
+	idm::select<named_thread<spu_thread>>(on_select);
 	GetCallbacks().on_resume();
 }
 
@@ -1352,23 +1536,14 @@ void Emulator::Stop(bool restart)
 	fxm::remove<GDBDebugServer>();
 #endif
 
-	auto e_stop = std::make_exception_ptr(cpu_flag::dbg_global_stop);
-
 	auto on_select = [&](u32, cpu_thread& cpu)
 	{
 		cpu.state += cpu_flag::dbg_global_stop;
-
-		// Can't normally be null.
-		// Hack for a possible vm deadlock on thread creation.
-		if (auto thread = cpu.get())
-		{
-			thread->set_exception(e_stop);
-		}
+		cpu.notify();
 	};
 
-	idm::select<ppu_thread>(on_select);
-	idm::select<RawSPUThread>(on_select);
-	idm::select<SPUThread>(on_select);
+	idm::select<named_thread<ppu_thread>>(on_select);
+	idm::select<named_thread<spu_thread>>(on_select);
 
 	LOG_NOTICE(GENERAL, "All threads signaled...");
 
@@ -1401,6 +1576,7 @@ void Emulator::Stop(bool restart)
 	extern void jit_finalize();
 	jit_finalize();
 #endif
+	jit_runtime::finalize();
 
 	if (restart)
 	{

@@ -129,6 +129,7 @@ namespace gui
 	const QString savedata    = "SaveData";
 	const QString users       = "Users";
 	const QString notes       = "Notes";
+	const QString titles      = "Titles";
 
 	const QColor gl_icon_color = QColor(36, 36, 36, 255);
 
@@ -138,6 +139,8 @@ namespace gui
 	const gui_save ib_pkg_success  = gui_save(main_window, "infoBoxEnabledInstallPKG", true);
 	const gui_save ib_pup_success  = gui_save(main_window, "infoBoxEnabledInstallPUP", true);
 	const gui_save ib_show_welcome = gui_save(main_window, "infoBoxEnabledWelcome",    true);
+	const gui_save ib_confirm_exit = gui_save(main_window, "confirmationBoxExitGame",  true);
+	const gui_save ib_confirm_boot = gui_save(main_window, "confirmationBoxBootGame",  true);
 
 	const gui_save fd_install_pkg  = gui_save(main_window, "lastExplorePathPKG",  "");
 	const gui_save fd_install_pup  = gui_save(main_window, "lastExplorePathPUP",  "");
@@ -146,16 +149,20 @@ namespace gui
 	const gui_save fd_decrypt_sprx = gui_save(main_window, "lastExplorePathSPRX", "");
 	const gui_save fd_cg_disasm    = gui_save(main_window, "lastExplorePathCGD",  "");
 
-	const gui_save mw_debugger       = gui_save(main_window, "debuggerVisible", false);
-	const gui_save mw_logger         = gui_save(main_window, "loggerVisible",   true);
-	const gui_save mw_gamelist       = gui_save(main_window, "gamelistVisible", true);
-	const gui_save mw_toolBarVisible = gui_save(main_window, "toolBarVisible",  true);
-	const gui_save mw_geometry       = gui_save(main_window, "geometry",        QByteArray());
-	const gui_save mw_windowState    = gui_save(main_window, "windowState",     QByteArray());
-	const gui_save mw_mwState        = gui_save(main_window, "wwState",         QByteArray());
+	const gui_save mw_debugger         = gui_save(main_window, "debuggerVisible",  false);
+	const gui_save mw_logger           = gui_save(main_window, "loggerVisible",    true);
+	const gui_save mw_gamelist         = gui_save(main_window, "gamelistVisible",  true);
+	const gui_save mw_toolBarVisible   = gui_save(main_window, "toolBarVisible",   true);
+	const gui_save mw_titleBarsVisible = gui_save(main_window, "titleBarsVisible", true);
+	const gui_save mw_geometry         = gui_save(main_window, "geometry",         QByteArray());
+	const gui_save mw_windowState      = gui_save(main_window, "windowState",      QByteArray());
+	const gui_save mw_mwState          = gui_save(main_window, "wwState",          QByteArray());
 
 	const gui_save cat_hdd_game    = gui_save(game_list, "categoryVisibleHDDGame",    true);
 	const gui_save cat_disc_game   = gui_save(game_list, "categoryVisibleDiscGame",   true);
+	const gui_save cat_ps1_game    = gui_save(game_list, "categoryVisiblePS1Game",    true);
+	const gui_save cat_ps2_game    = gui_save(game_list, "categoryVisiblePS2Game",    true);
+	const gui_save cat_psp_game    = gui_save(game_list, "categoryVisiblePSPGame",    true);
 	const gui_save cat_home        = gui_save(game_list, "categoryVisibleHome",       true);
 	const gui_save cat_audio_video = gui_save(game_list, "categoryVisibleAudioVideo", true);
 	const gui_save cat_game_data   = gui_save(game_list, "categoryVisibleGameData",   false);
@@ -173,6 +180,7 @@ namespace gui
 	const gui_save gl_marginFactor = gui_save(game_list, "marginFactor", (qreal) 0.09);
 	const gui_save gl_show_hidden  = gui_save(game_list, "show_hidden",  false);
 	const gui_save gl_hidden_list  = gui_save(game_list, "hidden_list",  QStringList());
+	const gui_save gl_draw_compat  = gui_save(game_list, "draw_compat",  false);
 
 	const gui_save fs_emulator_dir_list = gui_save(fs, "emulator_dir_list", QStringList());
 	const gui_save fs_dev_hdd0_list     = gui_save(fs, "dev_hdd0_list",     QStringList());
@@ -245,7 +253,8 @@ public:
 	QVariant List2Var(const q_pair_list& list);
 	q_pair_list Var2List(const QVariant &var);
 
-	void ShowInfoBox(const gui_save& entry, const QString& title, const QString& text, QWidget* parent = 0);
+	void ShowConfirmationBox(const QString& title, const QString& text, const gui_save& entry, int* result, QWidget* parent);
+	void ShowInfoBox(const QString& title, const QString& text, const gui_save& entry, QWidget* parent);
 
 	logs::level GetLogLevel();
 	bool GetGamelistColVisibility(int col);
@@ -257,6 +266,9 @@ public:
 
 public Q_SLOTS:
 	void Reset(bool removeMeta = false);
+
+	/** Remove entry */
+	void RemoveValue(const QString& key, const QString& name);
 
 	/** Write value to entry */
 	void SetValue(const gui_save& entry, const QVariant& value);
@@ -277,6 +289,7 @@ public Q_SLOTS:
 private:
 	QString ComputeSettingsDir();
 	void BackupSettingsToTarget(const QString& friendly_name);
+	void ShowBox(bool confirm, const QString& title, const QString& text, const gui_save& entry, int* result, QWidget* parent);
 
 	QSettings m_settings;
 	QDir m_settingsDir;

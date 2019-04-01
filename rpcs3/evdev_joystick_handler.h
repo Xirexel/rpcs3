@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "Utilities/types.h"
 #include "Utilities/Config.h"
@@ -199,6 +199,9 @@ class evdev_joystick_handler final : public PadHandlerBase
 		{ BTN_TRIGGER_HAPPY38 , "Happy 38"    },
 		{ BTN_TRIGGER_HAPPY39 , "Happy 39"    },
 		{ BTN_TRIGGER_HAPPY40 , "Happy 40"    },
+		// Xbox One S Controller returns some buttons as key when connected through bluetooth
+		{ KEY_BACK            , "Back Key"    },
+		{ KEY_HOMEPAGE        , "Homepage Key"},
 	};
 
 	// Unique positive axis names for the config files and our pad settings dialog
@@ -335,12 +338,13 @@ public:
 	bool bindPadToDevice(std::shared_ptr<Pad> pad, const std::string& device) override;
 	void ThreadProc() override;
 	void Close();
-	void GetNextButtonPress(const std::string& padId, const std::function<void(u16, std::string, int[])>& callback, bool get_blacklist = false, std::vector<std::string> buttons = {}) override;
+	void GetNextButtonPress(const std::string& padId, const std::function<void(u16, std::string, std::string, int[])>& callback, const std::function<void(std::string)>& fail_callback, bool get_blacklist = false, const std::vector<std::string>& buttons = {}) override;
 	void TestVibration(const std::string& padId, u32 largeMotor, u32 smallMotor) override;
 
 private:
 	void TranslateButtonPress(u64 keyCode, bool& pressed, u16& value, bool ignore_threshold = false) override;
 	EvdevDevice* get_device(const std::string& device);
+	std::string get_device_name(const libevdev* dev);
 	bool update_device(EvdevDevice& device);
 	void update_devs();
 	int add_device(const std::string& device, bool in_settings = false);

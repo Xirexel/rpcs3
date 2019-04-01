@@ -225,12 +225,22 @@ namespace rsx
 			return get_bounds(bounds).overlaps(other);
 		}
 
+		inline bool overlaps(const address_range_vector &other, section_bounds bounds) const
+		{
+			return get_bounds(bounds).overlaps(other);
+		}
+
 		inline bool overlaps(const buffered_section &other, section_bounds bounds) const
 		{
 			return get_bounds(bounds).overlaps(other.get_bounds(bounds));
 		}
 
 		inline bool inside(const address_range &other, section_bounds bounds) const
+		{
+			return get_bounds(bounds).inside(other);
+		}
+
+		inline bool inside(const address_range_vector &other, section_bounds bounds) const
 		{
 			return get_bounds(bounds).inside(other);
 		}
@@ -316,7 +326,7 @@ namespace rsx
 		 * Super Pointer
 		 */
 		template <typename T = void>
-		inline T* get_ptr(u32 address)
+		inline T* get_ptr(u32 address) const
 		{
 			return reinterpret_cast<T*>(vm::g_sudo_addr + address);
 		}
@@ -448,7 +458,7 @@ namespace rsx
 			{
 				ref_cnt++;
 
-				Emu.CallAfter([&]()
+				Emu.CallAfter([&, index, processed, entry_count]()
 				{
 					const char *text = index == 0 ? "Loading pipeline object %u of %u" : "Compiling pipeline object %u of %u";
 					dlg->ProgressBarSetMsg(index, fmt::format(text, processed, entry_count));
@@ -460,7 +470,7 @@ namespace rsx
 			{
 				ref_cnt++;
 
-				Emu.CallAfter([&]()
+				Emu.CallAfter([&, index, value]()
 				{
 					dlg->ProgressBarInc(index, value);
 					ref_cnt--;
@@ -471,7 +481,7 @@ namespace rsx
 			{
 				ref_cnt++;
 
-				Emu.CallAfter([&]()
+				Emu.CallAfter([&, index, limit]()
 				{
 					dlg->ProgressBarSetLimit(index, limit);
 					ref_cnt--;
@@ -495,13 +505,16 @@ namespace rsx
 			, pipeline_class_name(pipeline_class)
 			, m_storage(storage)
 		{
-			root_path = Emu.GetCachePath() + "/shaders_cache";
+			if (!g_cfg.video.disable_on_disk_shader_cache)
+			{
+				root_path = Emu.PPUCache() + "shaders_cache";
+			}
 		}
 
 		template <typename... Args>
 		void load(progress_dialog_helper* dlg, Args&& ...args)
 		{
-			if (g_cfg.video.disable_on_disk_shader_cache || Emu.GetCachePath() == "")
+			if (g_cfg.video.disable_on_disk_shader_cache)
 			{
 				return;
 			}
@@ -672,7 +685,7 @@ namespace rsx
 
 		void store(pipeline_storage_type &pipeline, RSXVertexProgram &vp, RSXFragmentProgram &fp)
 		{
-			if (g_cfg.video.disable_on_disk_shader_cache || Emu.GetCachePath() == "")
+			if (g_cfg.video.disable_on_disk_shader_cache)
 			{
 				return;
 			}
@@ -880,8 +893,11 @@ namespace rsx
 
 			storage_type* find_vertex_range(uintptr_t local_addr, upload_format fmt, u32 data_length) override
 			{
+				const auto data_end = local_addr + data_length;
+
 				for (auto &v : vertex_ranges[local_addr])
 				{
+					// NOTE: This has to match exactly. Using sized shortcuts such as >= comparison causes artifacting in some applications (UC1)
 					if (v.buffer_format == fmt && v.data_length == data_length)
 						return &v;
 				}

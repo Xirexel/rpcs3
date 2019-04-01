@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "overlay_controls.h"
 
 #include "../../../Utilities/date_time.h"
@@ -11,10 +11,15 @@
 #include "Emu/Cell/ErrorCodes.h"
 #include "Emu/Cell/Modules/cellSaveData.h"
 #include "Emu/Cell/Modules/cellMsgDialog.h"
+#include "Emu/Cell/Modules/cellOskDialog.h"
 #include "Emu/Cell/Modules/sceNpTrophy.h"
 #include "Utilities/CPUStats.h"
 #include "Utilities/Timer.h"
 
+// Utils
+std::string utf8_to_ascii8(const std::string& utf8_string);
+std::string utf16_to_ascii8(const std::u16string& utf16_string);
+std::u16string ascii8_to_utf16(const std::string& utf8_string);
 extern u64 get_system_time();
 
 // Definition of user interface implementations
@@ -44,7 +49,7 @@ namespace rsx
 		// Interactable UI element
 		struct user_interface : overlay
 		{
-			//Move this somewhere to avoid duplication
+			// Move this somewhere to avoid duplication
 			enum selection_code
 			{
 				new_save = -1,
@@ -58,14 +63,20 @@ namespace rsx
 				dpad_down,
 				dpad_left,
 				dpad_right,
+				select,
+				start,
 				triangle,
 				circle,
 				square,
-				cross
+				cross,
+				L1,
+				R1,
+
+				pad_button_max_enum
 			};
 
-			u64  input_timestamp = 0;
-			bool exit = false;
+			Timer input_timer;
+			bool  exit = false;
 
 			s32 return_code = CELL_OK;
 			std::function<void(s32 status)> on_close;
@@ -80,109 +91,15 @@ namespace rsx
 
 			void close();
 
-			s32 run_input_loop()
-			{
-				const auto handler = fxm::get<pad_thread>();
-				if (!handler)
-				{
-					LOG_ERROR(RSX, "Pad handler expected but none initialized!");
-					return selection_code::error;
-				}
-
-				const PadInfo& rinfo = handler->GetInfo();
-				if (rinfo.max_connect == 0)
-					return selection_code::error;
-
-				std::array<bool, 8> button_state;
-				button_state.fill(true);
-
-				while (!exit)
-				{
-					if (Emu.IsStopped())
-						return selection_code::canceled;
-
-					if (Emu.IsPaused() || !rinfo.now_connect)
-					{
-						std::this_thread::sleep_for(10ms);
-						continue;
-					}
-
-					for (const auto &pad : handler->GetPads())
-					{
-						for (auto &button : pad->m_buttons)
-						{
-							u8 button_id = 255;
-							if (button.m_offset == CELL_PAD_BTN_OFFSET_DIGITAL1)
-							{
-								switch (button.m_outKeyCode)
-								{
-								case CELL_PAD_CTRL_LEFT:
-									button_id = pad_button::dpad_left;
-									break;
-								case CELL_PAD_CTRL_RIGHT:
-									button_id = pad_button::dpad_right;
-									break;
-								case CELL_PAD_CTRL_DOWN:
-									button_id = pad_button::dpad_down;
-									break;
-								case CELL_PAD_CTRL_UP:
-									button_id = pad_button::dpad_up;
-									break;
-								}
-							}
-							else if (button.m_offset == CELL_PAD_BTN_OFFSET_DIGITAL2)
-							{
-								switch (button.m_outKeyCode)
-								{
-								case CELL_PAD_CTRL_TRIANGLE:
-									button_id = pad_button::triangle;
-									break;
-								case CELL_PAD_CTRL_CIRCLE:
-									button_id = pad_button::circle;
-									break;
-								case CELL_PAD_CTRL_SQUARE:
-									button_id = pad_button::square;
-									break;
-								case CELL_PAD_CTRL_CROSS:
-									button_id = pad_button::cross;
-									break;
-								}
-							}
-
-							if (button_id < 255)
-							{
-								if (button.m_pressed != button_state[button_id])
-									if (button.m_pressed) on_button_pressed(static_cast<pad_button>(button_id));
-
-								button_state[button_id] = button.m_pressed;
-							}
-
-							if (button.m_flush)
-							{
-								button.m_pressed = false;
-								button.m_flush = false;
-								button.m_value = 0;
-							}
-
-							if (exit)
-								return 0;
-						}
-					}
-
-					refresh();
-				}
-
-				//Unreachable
-				return 0;
-			}
+			s32 run_input_loop();
 		};
 
 		class display_manager
 		{
 		private:
 			atomic_t<u32> m_uid_ctr { 0u };
-			std::vector<std::unique_ptr<overlay>> m_iface_list;
-			std::vector<std::unique_ptr<overlay>> m_dirty_list;
+			std::vector<std::shared_ptr<overlay>> m_iface_list;
+			std::vector<std::shared_ptr<overlay>> m_dirty_list;
 
 			shared_mutex m_list_mutex;
 			std::vector<u32> m_uids_to_remove;
@@ -247,38 +164,36 @@ namespace rsx
 			// Adds an object to the internal list. Optionally removes other objects of the same type.
 			// Original handle loses ownership but a usable pointer is returned
 			template <typename T>
-			T* add(std::unique_ptr<T>& entry, bool remove_existing = true)
+			std::shared_ptr<T> add(std::shared_ptr<T>& entry, bool remove_existing = true)
 			{
 				std::lock_guard lock(m_list_mutex);
 
-				T* e = entry.get();
-				e->uid = m_uid_ctr.fetch_add(1);
-				e->type_index = id_manager::typeinfo::get_index<T>();
+				entry->uid = m_uid_ctr.fetch_add(1);
+				entry->type_index = id_manager::typeinfo::get_index<T>();
 
 				if (remove_existing)
 				{
 					for (auto It = m_iface_list.begin(); It != m_iface_list.end(); It++)
 					{
-						if (It->get()->type_index == e->type_index)
+						if (It->get()->type_index == entry->type_index)
 						{
 							// Replace
 							m_dirty_list.push_back(std::move(*It));
-							It->reset(e);
-							entry.reset();
-							return e;
+							*It = std::move(entry);
+							return std::static_pointer_cast<T>(*It);
 						}
 					}
 				}
 
 				m_iface_list.push_back(std::move(entry));
-				return e;
+				return std::static_pointer_cast<T>(m_iface_list.back());
 			}
 
 			// Allocates object and adds to internal list. Returns pointer to created object
 			template <typename T, typename ...Args>
-			T* create(Args&&... args)
+			std::shared_ptr<T> create(Args&&... args)
 			{
-				std::unique_ptr<T> object = std::make_unique<T>(std::forward<Args>(args)...);
+				auto object = std::make_shared<T>(std::forward<Args>(args)...);
 				return add(object);
 			}
 
@@ -325,14 +240,14 @@ namespace rsx
 			}
 
 			// Returns current list for reading. Caller must ensure synchronization by first locking the list
-			const std::vector<std::unique_ptr<overlay>>& get_views() const
+			const std::vector<std::shared_ptr<overlay>>& get_views() const
 			{
 				return m_iface_list;
 			}
 
 			// Returns current list of removed objects not yet deallocated for reading.
 			// Caller must ensure synchronization by first locking the list
-			const std::vector<std::unique_ptr<overlay>>& get_dirty() const
+			const std::vector<std::shared_ptr<overlay>>& get_dirty() const
 			{
 				return m_dirty_list;
 			}
@@ -349,7 +264,7 @@ namespace rsx
 
 				m_dirty_list.erase
 				(
-					std::remove_if(m_dirty_list.begin(), m_dirty_list.end(), [&uids](std::unique_ptr<overlay>& e)
+					std::remove_if(m_dirty_list.begin(), m_dirty_list.end(), [&uids](std::shared_ptr<overlay>& e)
 					{
 						return std::find(uids.begin(), uids.end(), e->uid) != uids.end();
 					}),
@@ -358,22 +273,22 @@ namespace rsx
 			}
 
 			// Returns pointer to the object matching the given uid
-			overlay* get(u32 uid)
+			std::shared_ptr<overlay> get(u32 uid)
 			{
 				reader_lock lock(m_list_mutex);
 
 				for (const auto& iface : m_iface_list)
 				{
 					if (iface->uid == uid)
-						return iface.get();
+						return iface;
 				}
 
-				return nullptr;
+				return {};
 			}
 
 			// Returns pointer to the first object matching the given type
 			template <typename T>
-			T* get()
+			std::shared_ptr<T> get()
 			{
 				reader_lock lock(m_list_mutex);
 
@@ -382,11 +297,11 @@ namespace rsx
 				{
 					if (iface->type_index == type_id)
 					{
-						return static_cast<T*>(iface.get());
+						return std::static_pointer_cast<T>(iface);
 					}
 				}
 
-				return nullptr;
+				return {};
 			}
 
 			// Lock for read-only access (BasicLockable)
@@ -414,7 +329,7 @@ namespace rsx
 			/*
 			   minimal - fps
 			   low - fps, total cpu usage
-			   medium  - fps, detailed cpu usage
+			   medium - fps, detailed cpu usage
 			   high - fps, frametime, detailed cpu usage, thread number, rsx load
 			 */
 			detail_level m_detail;
@@ -433,7 +348,7 @@ namespace rsx
 			u32 m_font_size;
 			u32 m_margin_x; // horizontal distance to the screen border relative to the screen_quadrant in px
 			u32 m_margin_y; // vertical distance to the screen border relative to the screen_quadrant in px
-			f32 m_opacity;	// 0..1
+			f32 m_opacity;  // 0..1
 
 			bool m_force_update;
 			bool m_is_initialised{ false };
@@ -470,6 +385,108 @@ namespace rsx
 			}
 		};
 
+		struct osk_dialog : public user_interface, public OskDialogBase
+		{
+			using callback_t = std::function<void(const std::string&)>;
+
+			enum border_flags
+			{
+				top = 1,
+				bottom = 2,
+				left = 4,
+				right = 8,
+
+				start_cell = top | bottom | left,
+				end_cell = top | bottom | right,
+				middle_cell = top | bottom,
+				default_cell = top | bottom | left | right
+			};
+
+			enum button_flags
+			{
+				_default = 0,
+				_return = 1,
+				_space = 2
+			};
+
+			struct cell
+			{
+				position2u pos;
+				color4f backcolor{};
+				border_flags flags = default_cell;
+				bool selected = false;
+				bool enabled = false;
+
+				std::vector<std::string> outputs;
+				callback_t callback;
+			};
+
+			struct grid_entry_ctor
+			{
+				std::vector<std::string> outputs;
+				color4f color;
+				u32 num_cell_hz;
+				button_flags type_flags;
+				callback_t callback;
+			};
+
+			// Base UI
+			overlay_element m_frame;
+			overlay_element m_background;
+			label m_title;
+			edit_text m_preview;
+			image_button m_btn_accept;
+			image_button m_btn_cancel;
+			image_button m_btn_shift;
+			image_button m_btn_space;
+			image_button m_btn_delete;
+
+			// Grid
+			u32 cell_size_x = 0;
+			u32 cell_size_y = 0;
+			u32 num_columns = 0;
+			u32 num_rows = 0;
+			u32 num_layers = 0;
+			u32 selected_x = 0;
+			u32 selected_y = 0;
+			u32 selected_z = 0;
+
+			std::vector<cell> m_grid;
+
+			bool m_visible = false;
+			bool m_update = true;
+			compiled_resource m_cached_resource;
+
+			u32 flags = 0;
+			u32 char_limit = UINT32_MAX;
+
+			osk_dialog() {}
+			virtual ~osk_dialog() {}
+
+			void Create(const std::string& title, const std::u16string& message, char16_t* init_text, u32 charlimit, u32 options) override = 0;
+			void Close(bool accepted) override;
+
+			void initialize_layout(const std::vector<grid_entry_ctor>& layout, const std::string& title, const std::string& initial_text);
+
+			void on_button_pressed(pad_button button_press) override;
+			void on_text_changed();
+
+			void on_default_callback(const std::string&);
+			void on_shift(const std::string&);
+			void on_space(const std::string&);
+			void on_backspace(const std::string&);
+			void on_enter(const std::string&);
+
+			compiled_resource get_compiled() override;
+		};
+
+		struct osk_enUS : osk_dialog
+		{
+			using osk_dialog::osk_dialog;
+
+			void Create(const std::string& title, const std::u16string& message, char16_t* init_text, u32 charlimit, u32 options);
+		};
+
 		struct save_dialog : public user_interface
 		{
 		private:
@@ -479,11 +496,11 @@ namespace rsx
 				std::unique_ptr<image_info> icon_data;
 
 			public:
-				save_dialog_entry(const char* text1, const char* text2, u8 resource_id, const std::vector<u8>& icon_buf)
+				save_dialog_entry(const std::string& text1, const std::string& text2, const std::string& text3, u8 resource_id, const std::vector<u8>& icon_buf)
 				{
 					std::unique_ptr<overlay_element> image = std::make_unique<image_view>();
 					image->set_size(160, 110);
-					image->set_padding(36, 36, 11, 11); //Square image, 88x88
+					image->set_padding(36, 36, 11, 11); // Square image, 88x88
 
 					if (resource_id != image_resource_id::raw_image)
 					{
@@ -491,35 +508,32 @@ namespace rsx
 					}
 					else if (icon_buf.size())
 					{
-						image->set_padding(0, 0, 11, 11); //Half sized icon, 320x176->160x88
+						image->set_padding(0, 0, 11, 11); // Half sized icon, 320x176->160x88
 						icon_data = std::make_unique<image_info>(icon_buf);
 						static_cast<image_view*>(image.get())->set_raw_image(icon_data.get());
 					}
 					else
 					{
-						//Fallback
+						// Fallback
 						static_cast<image_view*>(image.get())->set_image_resource(resource_config::standard_image_resource::save);
 					}
 
 					std::unique_ptr<overlay_element> text_stack = std::make_unique<vertical_layout>();
 					std::unique_ptr<overlay_element> padding = std::make_unique<spacer>();
-					std::unique_ptr<overlay_element> header_text = std::make_unique<label>(text1);
-					std::unique_ptr<overlay_element> subtext = std::make_unique<label>(text2);
+					std::unique_ptr<overlay_element> header_text = std::make_unique<label>(utf8_to_ascii8(text1));
+					std::unique_ptr<overlay_element> subtext = std::make_unique<label>(utf8_to_ascii8(text2));
 
 					padding->set_size(1, 1);
 					header_text->set_size(800, 40);
-					header_text->set_text(text1);
 					header_text->set_font("Arial", 16);
 					header_text->set_wrap_text(true);
-					subtext->set_size(800, 40);
-					subtext->set_text(text2);
+
+					subtext->set_size(800, 0);
 					subtext->set_font("Arial", 14);
 					subtext->set_wrap_text(true);
-
-					//Auto-resize save details label
 					static_cast<label*>(subtext.get())->auto_resize(true);
 
-					//Make back color transparent for text
+					// Make back color transparent for text
 					header_text->back_color.a = 0.f;
 					subtext->back_color.a = 0.f;
 
@@ -528,7 +542,26 @@ namespace rsx
 					static_cast<vertical_layout*>(text_stack.get())->add_element(header_text);
 					static_cast<vertical_layout*>(text_stack.get())->add_element(subtext);
 
-					//Pack
+					if (!text3.empty())
+					{
+						// Detail info actually exists
+						std::unique_ptr<overlay_element> detail = std::make_unique<label>(utf8_to_ascii8(text3));
+						detail->set_size(800, 0);
+						detail->set_font("Arial", 12);
+						detail->set_wrap_text(true);
+						detail->back_color.a = 0.f;
+						static_cast<label*>(detail.get())->auto_resize(true);
+						static_cast<vertical_layout*>(text_stack.get())->add_element(detail);
+					}
+
+					if (text_stack->h > image->h)
+					{
+						std::unique_ptr<overlay_element> padding2 = std::make_unique<spacer>();
+						padding2->set_size(1, 5);
+						static_cast<vertical_layout*>(text_stack.get())->add_element(padding2);
+					}
+
+					// Pack
 					this->pack_padding = 15;
 					add_element(image);
 					add_element(text_stack);
@@ -581,7 +614,7 @@ namespace rsx
 					if (m_no_saves)
 						break;
 					return_code = m_list->get_selected_index();
-					//Fall through
+					// Fall through
 				case pad_button::circle:
 					close();
 					break;
@@ -618,7 +651,7 @@ namespace rsx
 				for (auto& entry : save_entries)
 				{
 					std::unique_ptr<overlay_element> e;
-					e = std::make_unique<save_dialog_entry>(entry.title.c_str(), (entry.subtitle + " - " + entry.details).c_str(), image_resource_id::raw_image, entry.iconBuf);
+					e = std::make_unique<save_dialog_entry>(entry.title, entry.subtitle, entry.details, image_resource_id::raw_image, entry.iconBuf);
 					entries.emplace_back(std::move(e));
 				}
 
@@ -671,7 +704,7 @@ namespace rsx
 						id = image_resource_id::raw_image;
 					}
 
-					new_stub = std::make_unique<save_dialog_entry>(title, "Select to create a new entry", id, icon);
+					new_stub = std::make_unique<save_dialog_entry>(title, "Select to create a new entry", "", id, icon);
 
 					m_list->add_entry(new_stub);
 				}
@@ -686,12 +719,11 @@ namespace rsx
 
 				if (!m_list->m_items.size())
 				{
-					m_no_saves_text = std::make_unique<label>();
+					m_no_saves_text = std::make_unique<label>("There is no saved data.");
 					m_no_saves_text->set_font("Arial", 20);
 					m_no_saves_text->align_text(overlay_element::text_align::center);
 					m_no_saves_text->set_pos(m_list->x, m_list->y + m_list->h / 2);
 					m_no_saves_text->set_size(m_list->w, 30);
-					m_no_saves_text->set_text("There is no saved data.");
 					m_no_saves_text->back_color.a = 0;
 
 					m_no_saves = true;
@@ -760,28 +792,34 @@ namespace rsx
 				progress_1.back_color = color4f(0.25f, 0.f, 0.f, 0.85f);
 				progress_2.back_color = color4f(0.25f, 0.f, 0.f, 0.85f);
 
-				btn_ok.set_image_resource(resource_config::standard_image_resource::cross);
 				btn_ok.set_text("Yes");
 				btn_ok.set_size(140, 30);
 				btn_ok.set_pos(545, 420);
 				btn_ok.set_font("Arial", 16);
 
-				btn_cancel.set_image_resource(resource_config::standard_image_resource::circle);
 				btn_cancel.set_text("No");
 				btn_cancel.set_size(140, 30);
 				btn_cancel.set_pos(685, 420);
 				btn_cancel.set_font("Arial", 16);
 
+				if (g_cfg.sys.enter_button_assignment == enter_button_assign::circle)
+				{
+					btn_ok.set_image_resource(resource_config::standard_image_resource::circle);
+					btn_cancel.set_image_resource(resource_config::standard_image_resource::cross);
+				}
+				else
+				{
+					btn_ok.set_image_resource(resource_config::standard_image_resource::cross);
+					btn_cancel.set_image_resource(resource_config::standard_image_resource::circle);
+				}
+
 				if (use_custom_background)
 				{
-					std::string root_path = Emu.GetBoot();
-					root_path = root_path.substr(0, root_path.find_last_of("/"));
-
-					auto icon_path = root_path + "/../PIC1.PNG";
+					auto icon_path = Emu.GetSfoDir() + "/PIC1.PNG";
 					if (!fs::exists(icon_path))
 					{
 						// Fallback path
-						icon_path = root_path + "/../ICON0.PNG";
+						icon_path = Emu.GetSfoDir() + "/ICON0.PNG";
 					}
 
 					if (fs::exists(icon_path))
@@ -852,7 +890,7 @@ namespace rsx
 					}
 					else if (cancel_only)
 					{
-						//Do not accept for cancel-only dialogs
+						// Do not accept for cancel-only dialogs
 						return;
 					}
 					else
@@ -866,7 +904,7 @@ namespace rsx
 				{
 					if (ok_only)
 					{
-						//Ignore cancel operation for Ok-only
+						// Ignore cancel operation for Ok-only
 						return;
 					}
 					else if (cancel_only)
@@ -887,7 +925,7 @@ namespace rsx
 				close();
 			}
 
-			s32 show(std::string text, const MsgDialogType &type, std::function<void(s32 status)> on_close)
+			error_code show(const std::string text, const MsgDialogType &type, std::function<void(s32 status)> on_close)
 			{
 				num_progress_bars = type.progress_bar_count;
 				if (num_progress_bars)
@@ -901,13 +939,13 @@ namespace rsx
 						offset = 98;
 					}
 
-					//Push the other stuff down
+					// Push the other stuff down
 					bottom_bar.translate(0, offset);
 					btn_ok.translate(0, offset);
 					btn_cancel.translate(0, offset);
 				}
 
-				text_display.set_text(text.c_str());
+				text_display.set_text(utf8_to_ascii8(text));
 
 				u16 text_w, text_h;
 				text_display.measure_text(text_w, text_h);
@@ -938,13 +976,13 @@ namespace rsx
 				this->on_close = on_close;
 				if (interactive)
 				{
-					thread_ctrl::make_shared("dialog input thread", [&]
+					thread_ctrl::spawn("dialog input thread", [&]
 					{
 						if (auto error = run_input_loop())
 						{
 							LOG_ERROR(RSX, "Dialog input loop exited with error code=%d", error);
 						}
-					})->detach();
+					});
 				}
 
 				return CELL_OK;
@@ -960,7 +998,7 @@ namespace rsx
 				taskbar_index = index;
 			}
 
-			s32 progress_bar_set_message(u32 index, const std::string& msg)
+			error_code progress_bar_set_message(u32 index, const std::string& msg)
 			{
 				if (index >= num_progress_bars)
 					return CELL_MSGDIALOG_ERROR_PARAM;
@@ -973,7 +1011,7 @@ namespace rsx
 				return CELL_OK;
 			}
 
-			s32 progress_bar_increment(u32 index, f32 value)
+			error_code progress_bar_increment(u32 index, f32 value)
 			{
 				if (index >= num_progress_bars)
 					return CELL_MSGDIALOG_ERROR_PARAM;
@@ -989,7 +1027,7 @@ namespace rsx
 				return CELL_OK;
 			}
 
-			s32 progress_bar_reset(u32 index)
+			error_code progress_bar_reset(u32 index)
 			{
 				if (index >= num_progress_bars)
 					return CELL_MSGDIALOG_ERROR_PARAM;
@@ -1004,7 +1042,7 @@ namespace rsx
 				return CELL_OK;
 			}
 
-			s32 progress_bar_set_limit(u32 index, u32 limit)
+			error_code progress_bar_set_limit(u32 index, u32 limit)
 			{
 				if (index >= num_progress_bars)
 					return CELL_MSGDIALOG_ERROR_PARAM;
@@ -1091,7 +1129,7 @@ namespace rsx
 				default: break;
 				}
 
-				trophy_message = "You have earned the " + trophy_message + " trophy\n" + trophy.name;
+				trophy_message = "You have earned the " + trophy_message + " trophy\n" + utf8_to_ascii8(trophy.name);
 				text_view.set_text(trophy_message);
 				text_view.auto_resize();
 
@@ -1112,8 +1150,8 @@ namespace rsx
 			u8 current_dot = 255;
 
 			u64 creation_time = 0;
-			u64 expire_time = 0; //Time to end the prompt
-			u64 urgency_ctr = 0; //How critical it is to show to the user
+			u64 expire_time = 0; // Time to end the prompt
+			u64 urgency_ctr = 0; // How critical it is to show to the user
 
 			shader_compile_notification()
 			{
@@ -1143,7 +1181,7 @@ namespace rsx
 
 			void update_animation(u64 t)
 			{
-				//Update rate is twice per second
+				// Update rate is twice per second
 				auto elapsed = t - creation_time;
 				elapsed /= 500000;
 
@@ -1163,7 +1201,7 @@ namespace rsx
 				}
 			}
 
-			//Extends visible time by half a second. Also updates the screen
+			// Extends visible time by half a second. Also updates the screen
 			void touch()
 			{
 				if (urgency_ctr == 0 || urgency_ctr > 8)
@@ -1184,7 +1222,7 @@ namespace rsx
 
 				update_animation(current_time);
 
-				//Usually this method is called during a draw-to-screen operation. Reset urgency ctr
+				// Usually this method is called during a draw-to-screen operation. Reset urgency ctr
 				urgency_ctr = 1;
 			}
 

@@ -129,6 +129,11 @@ error_code sys_rwlock_rlock(ppu_thread& ppu, u32 rw_lock_id, u64 timeout)
 
 	while (!ppu.state.test_and_reset(cpu_flag::signal))
 	{
+		if (ppu.is_stopped())
+		{
+			return 0;
+		}
+
 		if (timeout)
 		{
 			const u64 passed = get_system_time() - ppu.start_time;
@@ -164,17 +169,18 @@ error_code sys_rwlock_tryrlock(u32 rw_lock_id)
 
 	const auto rwlock = idm::check<lv2_obj, lv2_rwlock>(rw_lock_id, [](lv2_rwlock& rwlock)
 	{
-		const s64 val = rwlock.owner;
-
-		if (val <= 0 && !(val & 1))
+		auto [_, ok] = rwlock.owner.fetch_op([](s64& val)
 		{
-			if (rwlock.owner.compare_and_swap_test(val, val - 2))
+			if (val <= 0 && !(val & 1))
 			{
+				val -= 2;
 				return true;
 			}
-		}
 
-		return false;
+			return false;
+		});
+
+		return ok;
 	});
 
 	if (!rwlock)
@@ -318,6 +324,11 @@ error_code sys_rwlock_wlock(ppu_thread& ppu, u32 rw_lock_id, u64 timeout)
 
 	while (!ppu.state.test_and_reset(cpu_flag::signal))
 	{
+		if (ppu.is_stopped())
+		{
+			return 0;
+		}
+
 		if (timeout)
 		{
 			const u64 passed = get_system_time() - ppu.start_time;

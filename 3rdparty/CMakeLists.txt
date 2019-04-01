@@ -86,6 +86,16 @@ else()
 endif()
 
 
+# libusb
+if(CMAKE_SYSTEM MATCHES "DragonFly|FreeBSD")
+	# Always use system libusb as reference implementation isn't supported
+	add_library(usb-1.0-static INTERFACE)
+	target_link_libraries(usb-1.0-static INTERFACE usb)
+else()
+	add_subdirectory(libusb EXCLUDE_FROM_ALL)
+endif()
+
+
 # yaml-cpp
 # We don't want to install yaml-cpp but its cmake file doesn't have option
 # to disable it...
@@ -152,7 +162,7 @@ target_include_directories(3rdparty_stblib INTERFACE stblib)
 add_library(3rdparty_discord-rpc INTERFACE)
 
 # We don't want Discord Rich Presence on the BSDs and other OSes
-if (WIN32 OR CMAKE_SYSTEM MATCHES "Linux" OR APPLE)
+if (USE_DISCORD_RPC AND (WIN32 OR CMAKE_SYSTEM MATCHES "Linux" OR APPLE))
 	if (WIN32 AND NOT MSVC)
 		ExternalProject_Add(discord-rpc
 				GIT_REPOSITORY https://github.com/discordapp/discord-rpc
@@ -168,7 +178,7 @@ if (WIN32 OR CMAKE_SYSTEM MATCHES "Linux" OR APPLE)
 	set(DISCORD_RPC_LIB NOTFOUND)
 	if (WIN32)
 		if (NOT MSVC)
-			set(DISCORD_RPC_LIB ${CMAKE_BINARY_DIR}/discord-rpc/src/libdiscord-rpc.a)
+			set(DISCORD_RPC_LIB ${CMAKE_CURRENT_BINARY_DIR}/discord-rpc/src/libdiscord-rpc.a)
 		else()
 			find_library(DISCORD_RPC_LIB discord-rpc PATHS discord-rpc/lib/ NO_DEFAULT_PATH)
 		endif()
@@ -178,6 +188,9 @@ if (WIN32 OR CMAKE_SYSTEM MATCHES "Linux" OR APPLE)
 		find_library(DISCORD_RPC_LIB discord-rpc-mac PATHS discord-rpc/lib/ NO_DEFAULT_PATH)
 	endif()
 	target_link_libraries(3rdparty_discord-rpc INTERFACE ${DISCORD_RPC_LIB})
+	if(APPLE)
+		target_link_libraries(3rdparty_discord-rpc INTERFACE "objc" "-framework Foundation" "-framework CoreServices")
+	endif()
 endif()
 
 
@@ -231,7 +244,7 @@ endif()
 
 # Vulkan
 set(VULKAN_TARGET 3rdparty_dummy_lib)
-if(NOT APPLE AND USE_VULKAN)
+if(USE_VULKAN)
 	find_package(Vulkan)
 	if(VULKAN_FOUND)
 		add_library(3rdparty_vulkan INTERFACE)
@@ -339,6 +352,7 @@ include(llvm.cmake)
 
 
 # add nice ALIAS targets for ease of use
+add_library(3rdparty::libusb ALIAS usb-1.0-static)
 add_library(3rdparty::zlib ALIAS 3rdparty_zlib)
 add_library(3rdparty::pugixml ALIAS pugixml)
 add_library(3rdparty::yaml-cpp ALIAS yaml-cpp)

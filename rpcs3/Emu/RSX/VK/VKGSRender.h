@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "Emu/RSX/GSRender.h"
 #include "VKHelpers.h"
 #include "VKTextureCache.h"
@@ -25,7 +25,9 @@ namespace vk
 		VkPrimitiveTopology primitive;
 		u32 vertex_draw_count;
 		u32 allocated_vertex_count;
+		u32 first_vertex;
 		u32 vertex_index_base;
+		u32 vertex_index_offset;
 		u32 persistent_window_offset;
 		u32 volatile_window_offset;
 		std::optional<std::tuple<VkDeviceSize, VkIndexType>> index_info;
@@ -36,8 +38,9 @@ namespace vk
 //NOTE: Texture uploads can be huge, up to 16MB for a single texture (4096x4096px)
 #define VK_ATTRIB_RING_BUFFER_SIZE_M 384
 #define VK_TEXTURE_UPLOAD_RING_BUFFER_SIZE_M 256
-#define VK_UBO_RING_BUFFER_SIZE_M 64
+#define VK_UBO_RING_BUFFER_SIZE_M 16
 #define VK_TRANSFORM_CONSTANTS_BUFFER_SIZE_M 64
+#define VK_FRAGMENT_CONSTANTS_BUFFER_SIZE_M 64
 #define VK_INDEX_RING_BUFFER_SIZE_M 64
 
 #define VK_MAX_ASYNC_CB_COUNT 64
@@ -45,18 +48,10 @@ namespace vk
 
 extern u64 get_system_time();
 
-enum command_buffer_data_flag
-{
-	cb_has_occlusion_task = 1
-};
-
 struct command_buffer_chunk: public vk::command_buffer
 {
 	VkFence submit_fence = VK_NULL_HANDLE;
 	VkDevice m_device = VK_NULL_HANDLE;
-
-	u32 num_draws = 0;
-	u32 flags = 0;
 
 	std::atomic_bool pending = { false };
 	std::atomic<u64> last_sync = { 0 };
@@ -93,11 +88,9 @@ struct command_buffer_chunk: public vk::command_buffer
 			poke();
 
 		if (pending)
-			wait();
+			wait(FRAME_PRESENT_TIMEOUT);
 
 		CHECK_RESULT(vkResetCommandBuffer(commands, 0));
-		num_draws = 0;
-		flags = 0;
 	}
 
 	bool poke()
@@ -121,14 +114,14 @@ struct command_buffer_chunk: public vk::command_buffer
 		return !pending;
 	}
 
-	void wait()
+	VkResult wait(u64 timeout = 0ull)
 	{
 		reader_lock lock(guard_mutex);
 
 		if (!pending)
-			return;
+			return VK_SUCCESS;
 
-		vk::wait_for_fence(submit_fence);
+		const auto ret = vk::wait_for_fence(submit_fence, timeout);
 
 		lock.upgrade();
 
@@ -137,12 +130,14 @@ struct command_buffer_chunk: public vk::command_buffer
 			vk::reset_fence(&submit_fence);
 			pending = false;
 		}
+
+		return ret;
 	}
 };
 
 struct occlusion_data
 {
-	std::vector<u32> indices;
+	rsx::simple_array<u32> indices;
 	command_buffer_chunk* command_buffer_to_wait = nullptr;
 };
 
@@ -161,8 +156,12 @@ struct frame_context_t
 
 	//Heap pointers
 	s64 attrib_heap_ptr = 0;
-	s64 ubo_heap_ptr = 0;
-	s64 vtxconst_heap_ptr = 0;
+	s64 vtx_env_heap_ptr = 0;
+	s64 frag_env_heap_ptr = 0;
+	s64 frag_const_heap_ptr = 0;
+	s64 vtx_const_heap_ptr = 0;
+	s64 vtx_layout_heap_ptr = 0;
+	s64 frag_texparam_heap_ptr = 0;
 	s64 index_heap_ptr = 0;
 	s64 texture_upload_heap_ptr = 0;
 
@@ -177,9 +176,13 @@ struct frame_context_t
 		used_descriptors = other.used_descriptors;
 
 		attrib_heap_ptr = other.attrib_heap_ptr;
-		ubo_heap_ptr = other.attrib_heap_ptr;
-		vtxconst_heap_ptr = other.vtxconst_heap_ptr;
-		index_heap_ptr = other.attrib_heap_ptr;
+		vtx_env_heap_ptr = other.vtx_env_heap_ptr;
+		frag_env_heap_ptr = other.frag_env_heap_ptr;
+		vtx_layout_heap_ptr = other.vtx_layout_heap_ptr;
+		frag_texparam_heap_ptr = other.frag_texparam_heap_ptr;
+		frag_const_heap_ptr = other.frag_const_heap_ptr;
+		vtx_const_heap_ptr = other.vtx_const_heap_ptr;
+		index_heap_ptr = other.index_heap_ptr;
 		texture_upload_heap_ptr = other.texture_upload_heap_ptr;
 	}
 
@@ -190,11 +193,15 @@ struct frame_context_t
 		std::swap(samplers_to_clean, other.samplers_to_clean);
 	}
 
-	void tag_frame_end(s64 attrib_loc, s64 ubo_loc, s64 vtxconst_loc, s64 index_loc, s64 texture_loc)
+	void tag_frame_end(s64 attrib_loc, s64 vtxenv_loc, s64 fragenv_loc, s64 vtxlayout_loc, s64 fragtex_loc, s64 fragconst_loc,s64 vtxconst_loc, s64 index_loc, s64 texture_loc)
 	{
 		attrib_heap_ptr = attrib_loc;
-		ubo_heap_ptr = ubo_loc;
-		vtxconst_heap_ptr = vtxconst_loc;
+		vtx_env_heap_ptr = vtxenv_loc;
+		frag_env_heap_ptr = fragenv_loc;
+		vtx_layout_heap_ptr = vtxlayout_loc;
+		frag_texparam_heap_ptr = fragtex_loc;
+		frag_const_heap_ptr = fragconst_loc;
+		vtx_const_heap_ptr = vtxconst_loc;
 		index_heap_ptr = index_loc;
 		texture_upload_heap_ptr = texture_loc;
 
@@ -278,6 +285,7 @@ private:
 	shared_mutex m_sampler_mutex;
 	u64 surface_store_tag = 0;
 	std::atomic_bool m_samplers_dirty = { true };
+	std::unique_ptr<vk::sampler> m_stencil_mirror_sampler;
 	std::array<std::unique_ptr<rsx::sampled_image_descriptor_base>, rsx::limits::fragment_textures_count> fs_sampler_state = {};
 	std::array<std::unique_ptr<rsx::sampled_image_descriptor_base>, rsx::limits::vertex_textures_count> vs_sampler_state = {};
 	std::array<std::unique_ptr<vk::sampler>, rsx::limits::fragment_textures_count> fs_sampler_handles;
@@ -326,15 +334,22 @@ private:
 	u64 m_last_heap_sync_time = 0;
 	u32 m_texbuffer_view_size = 0;
 
-	vk::vk_data_heap m_attrib_ring_info;
-	vk::vk_data_heap m_uniform_buffer_ring_info;
-	vk::vk_data_heap m_transform_constants_ring_info;
-	vk::vk_data_heap m_index_buffer_ring_info;
-	vk::vk_data_heap m_texture_upload_buffer_ring_info;
+	vk::data_heap m_attrib_ring_info;                  // Vertex data
+	vk::data_heap m_fragment_constants_ring_info;      // Fragment program constants
+	vk::data_heap m_transform_constants_ring_info;     // Transform program constants
+	vk::data_heap m_fragment_env_ring_info;            // Fragment environment params
+	vk::data_heap m_vertex_env_ring_info;              // Vertex environment params
+	vk::data_heap m_fragment_texture_params_ring_info; // Fragment texture params
+	vk::data_heap m_vertex_layout_ring_info;           // Vertex layout structure
+	vk::data_heap m_index_buffer_ring_info;            // Index data
+	vk::data_heap m_texture_upload_buffer_ring_info;   // Texture upload heap
 
-	VkDescriptorBufferInfo m_vertex_state_buffer_info;
+	VkDescriptorBufferInfo m_vertex_env_buffer_info;
+	VkDescriptorBufferInfo m_fragment_env_buffer_info;
 	VkDescriptorBufferInfo m_vertex_constants_buffer_info;
-	VkDescriptorBufferInfo m_fragment_state_buffer_info;
+	VkDescriptorBufferInfo m_fragment_constants_buffer_info;
+	VkDescriptorBufferInfo m_vertex_layout_buffer_info;
+	VkDescriptorBufferInfo m_fragment_texture_params_buffer_info;
 
 	std::array<frame_context_t, VK_MAX_ASYNC_FRAMES> frame_context_storage;
 	//Temp frame context to use if the real frame queue is overburdened. Only used for storage
@@ -349,8 +364,8 @@ private:
 	u32 m_client_width = 0;
 	u32 m_client_height = 0;
 
-	// Draw call stats
-	u32 m_draw_calls = 0;
+	VkViewport m_viewport{};
+	VkRect2D m_scissor{};
 
 	// Timers
 	s64 m_setup_time = 0;
@@ -360,7 +375,7 @@ private:
 	s64 m_flip_time = 0;
 
 	std::vector<u8> m_draw_buffers;
-	
+
 	shared_mutex m_flush_queue_mutex;
 	flush_request_task m_flush_requests;
 
@@ -377,6 +392,7 @@ private:
 #endif
 
 public:
+	u64 get_cycles() override final;
 	VKGSRender();
 	~VKGSRender();
 
@@ -400,15 +416,24 @@ private:
 
 	void check_heap_status();
 
+	void check_descriptors();
+	VkDescriptorSet allocate_descriptor_set();
+
 	vk::vertex_upload_info upload_vertex_data();
 
-public:
 	bool load_program();
-	void load_program_env(const vk::vertex_upload_info& vertex_info);
+	void load_program_env();
+	void update_vertex_env(const vk::vertex_upload_info& upload_info);
+
+public:
 	void init_buffers(rsx::framebuffer_creation_context context, bool skip_reading = false);
 	void read_buffers();
 	void write_buffers();
 	void set_viewport();
+	void set_scissor();
+	void bind_viewport();
+
+	void check_window_status();
 
 	void sync_hint(rsx::FIFO_hint hint) override;
 
@@ -421,6 +446,7 @@ public:
 protected:
 	void begin() override;
 	void end() override;
+	void emit_geometry(u32 sub_index) override;
 
 	void on_init_thread() override;
 	void on_exit() override;

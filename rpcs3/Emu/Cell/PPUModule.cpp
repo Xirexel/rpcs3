@@ -1,4 +1,4 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "Utilities/VirtualMemory.h"
 #include "Utilities/bin_patch.h"
 #include "Crypto/sha1.h"
@@ -12,6 +12,9 @@
 #include "Emu/Cell/PPUAnalyser.h"
 
 #include "Emu/Cell/lv2/sys_prx.h"
+#include "Emu/Cell/lv2/sys_memory.h"
+
+#include "Emu/Cell/Modules/StaticHLE.h"
 
 #include <map>
 #include <set>
@@ -167,6 +170,7 @@ static void ppu_initialize_modules(const std::shared_ptr<ppu_linkage_info>& link
 		&ppu_module_manager::cellCrossController,
 		&ppu_module_manager::cellDaisy,
 		&ppu_module_manager::cellDmux,
+		&ppu_module_manager::cellDtcpIpUtility,
 		&ppu_module_manager::cellFiber,
 		&ppu_module_manager::cellFont,
 		&ppu_module_manager::cellFontFT,
@@ -190,10 +194,12 @@ static void ppu_initialize_modules(const std::shared_ptr<ppu_linkage_info>& link
 		&ppu_module_manager::cellMusic,
 		&ppu_module_manager::cellMusicDecode,
 		&ppu_module_manager::cellMusicExport,
+		&ppu_module_manager::cellNetAoi,
 		&ppu_module_manager::cellNetCtl,
 		&ppu_module_manager::cellOskDialog,
 		&ppu_module_manager::cellOvis,
 		&ppu_module_manager::cellPamf,
+		&ppu_module_manager::cellPesmUtility,
 		&ppu_module_manager::cellPhotoDecode,
 		&ppu_module_manager::cellPhotoExport,
 		&ppu_module_manager::cellPhotoImportUtil,
@@ -224,8 +230,8 @@ static void ppu_initialize_modules(const std::shared_ptr<ppu_linkage_info>& link
 		&ppu_module_manager::cellSysmodule,
 		&ppu_module_manager::cellSysutil,
 		&ppu_module_manager::cellSysutilAp,
-		&ppu_module_manager::cellSysutilAvc,
 		&ppu_module_manager::cellSysutilAvc2,
+		&ppu_module_manager::cellSysutilAvcExt,
 		&ppu_module_manager::cellSysutilNpEula,
 		&ppu_module_manager::cellSysutilMisc,
 		&ppu_module_manager::cellUsbd,
@@ -233,9 +239,12 @@ static void ppu_initialize_modules(const std::shared_ptr<ppu_linkage_info>& link
 		&ppu_module_manager::cellUserInfo,
 		&ppu_module_manager::cellVdec,
 		&ppu_module_manager::cellVideoExport,
+		&ppu_module_manager::cellVideoPlayerUtility,
 		&ppu_module_manager::cellVideoUpload,
 		&ppu_module_manager::cellVoice,
 		&ppu_module_manager::cellVpost,
+		&ppu_module_manager::libad_async,
+		&ppu_module_manager::libad_core,
 		&ppu_module_manager::libmedi,
 		&ppu_module_manager::libmixer,
 		&ppu_module_manager::libsnd3,
@@ -254,6 +263,7 @@ static void ppu_initialize_modules(const std::shared_ptr<ppu_linkage_info>& link
 		&ppu_module_manager::sysPrxForUser,
 		&ppu_module_manager::sys_libc,
 		&ppu_module_manager::sys_lv2dbg,
+		&ppu_module_manager::static_hle,
 	};
 
 	// Initialize double-purpose fake OPD array for HLE functions
@@ -983,7 +993,11 @@ std::shared_ptr<lv2_prx> ppu_load_prx(const ppu_prx_object& elf, const std::stri
 	if (Emu.IsReady() && fxm::import<ppu_module>([&] { return prx; }))
 	{
 		// Special loading mode
-		auto ppu = idm::make_ptr<ppu_thread>("test_thread", 0, 0x100000);
+		ppu_thread_params p{};
+		p.stack_addr = vm::cast(vm::alloc(0x100000, vm::stack, 4096));
+		p.stack_size = 0x100000;
+
+		auto ppu = idm::make_ptr<named_thread<ppu_thread>>("PPU[0x1000000] Thread (test_thread)", p, "test_thread", 0);
 
 		ppu->cmd_push({ppu_cmd::initialize, 0});
 	}
@@ -1039,7 +1053,7 @@ void ppu_load_exec(const ppu_exec_object& elf)
 
 	// Process information
 	u32 sdk_version = 0x360001;
-	s32 primary_prio = 0x50;
+	s32 primary_prio = 1001;
 	u32 primary_stacksize = 0x100000;
 	u32 malloc_pagesize = 0x100000;
 
@@ -1131,6 +1145,18 @@ void ppu_load_exec(const ppu_exec_object& elf)
 	// Initialize HLE modules
 	ppu_initialize_modules(link);
 
+	// Static HLE patching
+	if (g_cfg.core.hook_functions)
+	{
+		auto shle = fxm::get_always<statichle_handler>();
+
+		for (u32 i = _main->segs[0].addr; i < (_main->segs[0].addr + _main->segs[0].size); i += 4)
+		{
+			vm::cptr<u8> _ptr = vm::cast(i);
+			shle->check_against_patterns(_ptr, (_main->segs[0].addr + _main->segs[0].size) - i, i);
+		}
+	}
+
 	// Load other programs
 	for (auto& prog : elf.progs)
 	{
@@ -1177,7 +1203,12 @@ void ppu_load_exec(const ppu_exec_object& elf)
 				else
 				{
 					sdk_version = info.sdk_version;
-					primary_prio = info.primary_prio;
+
+					if (s32 prio = info.primary_prio; prio < 3072 && prio >= 0)
+					{
+						primary_prio = prio;
+					}
+
 					primary_stacksize = info.primary_stacksize;
 					malloc_pagesize = info.malloc_pagesize;
 
@@ -1423,7 +1454,7 @@ void ppu_load_exec(const ppu_exec_object& elf)
 	}
 
 	// Set path (TODO)
-	_main->name = "";
+	_main->name.clear();
 	_main->path = vfs::get(Emu.argv[0]);
 
 	// Analyse executable (TODO)
@@ -1463,7 +1494,7 @@ void ppu_load_exec(const ppu_exec_object& elf)
 	}
 
 	// Fix primary stack size
-	switch (primary_stacksize)
+	switch (u32 sz = primary_stacksize)
 	{
 	case 0x10: primary_stacksize = 32 * 1024; break; // SYS_PROCESS_PRIMARY_STACK_SIZE_32K
 	case 0x20: primary_stacksize = 64 * 1024; break; // SYS_PROCESS_PRIMARY_STACK_SIZE_64K
@@ -1472,10 +1503,19 @@ void ppu_load_exec(const ppu_exec_object& elf)
 	case 0x50: primary_stacksize = 256 * 1024; break; // SYS_PROCESS_PRIMARY_STACK_SIZE_256K
 	case 0x60: primary_stacksize = 512 * 1024; break; // SYS_PROCESS_PRIMARY_STACK_SIZE_512K
 	case 0x70: primary_stacksize = 1024 * 1024; break; // SYS_PROCESS_PRIMARY_STACK_SIZE_1M
+	default:
+	{
+		primary_stacksize = sz >= 4096 ? ::align(std::min<u32>(sz, 0x100000), 4096) : 0x4000;
+		break;
+	}
 	}
 
 	// Initialize main thread
-	auto ppu = idm::make_ptr<ppu_thread>("main_thread", primary_prio, primary_stacksize);
+	ppu_thread_params p{};
+	p.stack_addr = vm::cast(vm::alloc(primary_stacksize, vm::stack, 4096));
+	p.stack_size = primary_stacksize;
+
+	auto ppu = idm::make_ptr<named_thread<ppu_thread>>("PPU[0x1000000] Thread (main_thread)", p, "main_thread", primary_prio, 1);
 
 	// Write initial data (exitspawn)
 	if (Emu.data.size())
@@ -1483,6 +1523,42 @@ void ppu_load_exec(const ppu_exec_object& elf)
 		std::memcpy(vm::base(ppu->stack_addr + ppu->stack_size - ::size32(Emu.data)), Emu.data.data(), Emu.data.size());
 		ppu->gpr[1] -= Emu.data.size();
 	}
+
+	// Initialize memory stats (according to sdk version)
+	// TODO: This is probably wrong with vsh.self
+	u32 mem_size;
+	if (sdk_version > 0x0021FFFF)
+	{
+		mem_size = 0xD500000; 
+	}
+	else if (sdk_version > 0x00192FFF)
+	{
+		mem_size = 0xD300000;
+	}
+	else if (sdk_version > 0x0018FFFF)
+	{
+		mem_size = 0xD100000;
+	}
+	else if (sdk_version > 0x0017FFFF)
+	{
+		mem_size = 0xD000000;
+	}
+	else if (sdk_version > 0x00154FFF)
+	{
+		mem_size = 0xCC00000;
+	}
+	else
+	{
+		mem_size = 0xC800000;
+	}
+
+	if (g_cfg.core.debug_console_mode)
+	{
+		// TODO: Check for all sdk versions
+		mem_size += 0xC000000;
+	}
+
+	fxm::make_always<lv2_memory_container>(mem_size);
 
 	ppu->cmd_push({ppu_cmd::initialize, 0});
 

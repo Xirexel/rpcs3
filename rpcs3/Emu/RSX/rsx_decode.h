@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "Utilities/types.h"
 #include "Utilities/BitField.h"
 #include "Utilities/StrFmt.h"
@@ -2106,6 +2106,31 @@ struct registers_decoder<NV406E_SEMAPHORE_OFFSET>
 };
 
 template<>
+struct registers_decoder<NV4097_SET_CONTEXT_DMA_SEMAPHORE>
+{
+	struct decoded_type
+	{
+	private:
+		union
+		{
+			u32 raw_value;
+		} m_data;
+	public:
+		decoded_type(u32 raw_value) { m_data.raw_value = raw_value; }
+
+		u32 context_dma() const
+		{
+			return m_data.raw_value;
+		}
+	};
+
+	static std::string dump(decoded_type &&decoded_values)
+	{
+		return "NV4097 semaphore: context = " + std::to_string(decoded_values.context_dma());
+	}
+};
+
+template<>
 struct registers_decoder<NV4097_SET_SEMAPHORE_OFFSET>
 {
 	struct decoded_type
@@ -2218,9 +2243,22 @@ struct registers_decoder<NV3089_DS_DX>
 	public:
 		decoded_type(u32 raw_value) { m_data.raw_value = raw_value; }
 
-		u32 ds_dx() const
+		// Convert signed fixed point 32-bit format
+		f32 ds_dx() const
 		{
-			return m_data.raw_value;
+			const u32 val = m_data.raw_value;
+
+			if ((val & ~(1<<31)) == 0)
+			{
+				return 0;
+			}
+
+			if ((s32)val < 0)
+			{
+				return 1.f / (((val & ~(1<<31)) / 1048576.f) - 2048.f);
+			}
+
+			return 1048576.f / val;
 		}
 	};
 
@@ -2243,9 +2281,22 @@ struct registers_decoder<NV3089_DT_DY>
 	public:
 		decoded_type(u32 raw_value) { m_data.raw_value = raw_value; }
 
-		u32 dt_dy() const
+		// Convert signed fixed point 32-bit format
+		f32 dt_dy() const
 		{
-			return m_data.raw_value;
+		    const u32 val = m_data.raw_value;
+
+			if ((val & ~(1<<31)) == 0)
+			{
+				return 0;
+			}
+
+			if ((s32)val < 0)
+			{
+				return 1.f / (((val & ~(1<<31)) / 1048576.f) - 2048.f);
+			}
+
+			return 1048576.f / val;
 		}
 	};
 
@@ -3479,6 +3530,7 @@ struct registers_decoder<NV4097_SET_SURFACE_FORMAT>
 			u32 raw_value;
 			bitfield_decoder_t<0, 5> color_fmt;
 			bitfield_decoder_t<5, 3> depth_fmt;
+			bitfield_decoder_t<8, 4> type;
 			bitfield_decoder_t<12, 4> antialias;
 			bitfield_decoder_t<16, 8> log2width;
 			bitfield_decoder_t<24, 8> log2height;
@@ -3494,6 +3546,11 @@ struct registers_decoder<NV4097_SET_SURFACE_FORMAT>
 		surface_depth_format depth_fmt() const
 		{
 			return to_surface_depth_format(m_data.depth_fmt);
+		}
+
+		surface_raster_type type() const
+		{
+			return static_cast<surface_raster_type>(u8(m_data.type));
 		}
 
 		surface_antialiasing antialias() const
@@ -3876,6 +3933,31 @@ struct registers_decoder<NV4097_SET_CONTEXT_DMA_REPORT>
 	static std::string dump(decoded_type &&decoded_values)
 	{
 		return "Report: context DMA = " + to_string(decoded_values.context_dma_report());
+	}
+};
+
+template<>
+struct registers_decoder<NV4097_SET_CONTEXT_DMA_NOTIFIES>
+{
+	struct decoded_type
+	{
+	private:
+		union
+		{
+			u32 raw_value;
+		} m_data;
+	public:
+		decoded_type(u32 raw_value) { m_data.raw_value = raw_value; }
+
+		u32 context_dma_notify() const
+		{
+			return m_data.raw_value;
+		}
+	};
+
+	static std::string dump(decoded_type &&decoded_values)
+	{
+		return fmt::format("NOTIFY: context DMA = 0x%x, index=%d", decoded_values.context_dma_notify(), (decoded_values.context_dma_notify() & 7) ^ 7);
 	}
 };
 
@@ -4522,7 +4604,7 @@ struct vertex_array_helper
 		union
 		{
 			u32 raw_value;
-			bitfield_decoder_t<0, 4> type;
+			bitfield_decoder_t<0, 3> type;
 			bitfield_decoder_t<4, 4> size;
 			bitfield_decoder_t<8, 8> stride;
 			bitfield_decoder_t<16, 16> frequency;

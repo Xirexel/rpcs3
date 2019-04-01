@@ -1,4 +1,4 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "Emu/System.h"
 #include "Emu/Cell/PPUModule.h"
 #include "Emu/IdManager.h"
@@ -147,10 +147,33 @@ error_code cellVideoOutConfigure(u32 videoOut, vm::ptr<CellVideoOutConfiguration
 		return CELL_VIDEO_OUT_ERROR_ILLEGAL_CONFIGURATION;
 	}
 
+	bool found = false;
+	video_resolution res;
+
+	for (const auto& ares : g_video_out_resolution_id)
+	{
+		if (ares.second == config->resolutionId)
+		{
+			found = true;
+			res = ares.first;
+			break;
+		}
+	}
+
+	if (!found)
+	{
+		cellSysutil.error("Unusual resolution requested: 0x%x", config->resolutionId);
+		return CELL_VIDEO_OUT_ERROR_UNSUPPORTED_DISPLAY_MODE;
+	}
+
+	auto& res_info = g_video_out_resolution_map.at(res);
+
 	auto conf = fxm::get_always<rsx::avconf>();
 	conf->aspect = config->aspect;
 	conf->format = config->format;
 	conf->scanline_pitch = config->pitch;
+	conf->resolution_x = u32(res_info.first);
+	conf->resolution_y = u32(res_info.second);
 
 	return CELL_OK;
 }

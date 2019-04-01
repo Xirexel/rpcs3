@@ -32,13 +32,22 @@
 #endif
 
 #define DESCRIPTOR_MAX_DRAW_CALLS 4096
+#define OCCLUSION_MAX_POOL_SIZE 8192
 
-#define VERTEX_BUFFERS_FIRST_BIND_SLOT 3
-#define FRAGMENT_CONSTANT_BUFFERS_BIND_SLOT 2
-#define VERTEX_CONSTANT_BUFFERS_BIND_SLOT 1
-#define SCALE_OFFSET_BIND_SLOT 0
-#define TEXTURES_FIRST_BIND_SLOT 19
-#define VERTEX_TEXTURES_FIRST_BIND_SLOT 35 //19+16
+#define VERTEX_PARAMS_BIND_SLOT 0
+#define VERTEX_LAYOUT_BIND_SLOT 1
+#define VERTEX_CONSTANT_BUFFERS_BIND_SLOT 2
+#define FRAGMENT_CONSTANT_BUFFERS_BIND_SLOT 3
+#define FRAGMENT_STATE_BIND_SLOT 4
+#define FRAGMENT_TEXTURE_PARAMS_BIND_SLOT 5
+#define VERTEX_BUFFERS_FIRST_BIND_SLOT 6
+#define TEXTURES_FIRST_BIND_SLOT 8
+#define VERTEX_TEXTURES_FIRST_BIND_SLOT 24 //8+16
+
+#define VK_NUM_DESCRIPTOR_BINDINGS (VERTEX_TEXTURES_FIRST_BIND_SLOT + 4)
+
+#define FRAME_PRESENT_TIMEOUT 1000000ull // 1 second
+#define GENERAL_WAIT_TIMEOUT  100000ull  // 100ms
 
 namespace rsx
 {
@@ -79,7 +88,7 @@ namespace vk
 	class command_buffer;
 	struct image;
 	struct buffer;
-	struct vk_data_heap;
+	struct data_heap;
 	class mem_allocator_base;
 	struct memory_type_mapping;
 	struct gpu_formats_support;
@@ -107,7 +116,7 @@ namespace vk
 
 	VkSampler null_sampler();
 	VkImageView null_image_view(vk::command_buffer&);
-	image* get_typeless_helper(VkFormat format);
+	image* get_typeless_helper(VkFormat format, u32 requested_width, u32 requested_height);
 	buffer* get_scratch_buffer();
 
 	memory_type_mapping get_memory_mapping(const physical_device& dev);
@@ -130,11 +139,11 @@ namespace vk
 	*/
 	void copy_mipmaped_image_using_buffer(VkCommandBuffer cmd, vk::image* dst_image,
 		const std::vector<rsx_subresource_layout>& subresource_layout, int format, bool is_swizzled, u16 mipmap_count,
-		VkImageAspectFlags flags, vk::vk_data_heap &upload_heap);
+		VkImageAspectFlags flags, vk::data_heap &upload_heap);
 
 	//Other texture management helpers
-	void change_image_layout(VkCommandBuffer cmd, VkImage image, VkImageLayout current_layout, VkImageLayout new_layout, VkImageSubresourceRange range);
-	void change_image_layout(VkCommandBuffer cmd, vk::image *image, VkImageLayout new_layout, VkImageSubresourceRange range);
+	void change_image_layout(VkCommandBuffer cmd, VkImage image, VkImageLayout current_layout, VkImageLayout new_layout, const VkImageSubresourceRange& range);
+	void change_image_layout(VkCommandBuffer cmd, vk::image *image, VkImageLayout new_layout, const VkImageSubresourceRange& range);
 	void change_image_layout(VkCommandBuffer cmd, vk::image *image, VkImageLayout new_layout);
 
 	void copy_image_typeless(const command_buffer &cmd, const image *src, const image *dst, const areai& src_rect, const areai& dst_rect,
@@ -146,8 +155,8 @@ namespace vk
 			VkImageAspectFlags src_transfer_mask = 0xFF, VkImageAspectFlags dst_transfer_mask = 0xFF);
 
 	void copy_scaled_image(VkCommandBuffer cmd, VkImage src, VkImage dst, VkImageLayout srcLayout, VkImageLayout dstLayout,
-			u32 src_x_offset, u32 src_y_offset, u32 src_width, u32 src_height, u32 dst_x_offset, u32 dst_y_offset, u32 dst_width, u32 dst_height, u32 mipmaps,
-			VkImageAspectFlags aspect, bool compatible_formats, VkFilter filter = VK_FILTER_LINEAR, VkFormat src_format = VK_FORMAT_UNDEFINED, VkFormat dst_format = VK_FORMAT_UNDEFINED);
+			const areai& src_rect, const areai& dst_rect, u32 mipmaps, VkImageAspectFlags aspect, bool compatible_formats,
+			VkFilter filter = VK_FILTER_LINEAR, VkFormat src_format = VK_FORMAT_UNDEFINED, VkFormat dst_format = VK_FORMAT_UNDEFINED);
 
 	std::pair<VkFormat, VkComponentMapping> get_compatible_surface_format(rsx::surface_color_format color_format);
 	size_t get_render_pass_location(VkFormat color_surface_format, VkFormat depth_stencil_format, u8 color_surface_count);
@@ -169,9 +178,10 @@ namespace vk
 	const u64 get_current_frame_id();
 	const u64 get_last_completed_frame_id();
 
-	//Fence reset with driver workarounds in place
+	// Fence reset with driver workarounds in place
 	void reset_fence(VkFence *pFence);
-	void wait_for_fence(VkFence pFence);
+	VkResult wait_for_fence(VkFence pFence, u64 timeout = 0ull);
+	VkResult wait_for_event(VkEvent pEvent, u64 timeout = 0ull);
 
 	void die_with_error(const char* faulting_addr, VkResult error_code);
 
@@ -652,7 +662,7 @@ namespace vk
 			VkImageTiling tiling,
 			VkImageUsageFlags usage,
 			VkImageCreateFlags image_flags)
-			: m_device(dev)
+			: m_device(dev), current_layout(initial_layout)
 		{
 			info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 			info.imageType = image_type;
@@ -686,7 +696,7 @@ namespace vk
 
 		// TODO: Ctor that uses a provided memory heap
 
-		~image()
+		virtual ~image()
 		{
 			vkDestroyImage(m_device, value, nullptr);
 		}
@@ -740,7 +750,7 @@ namespace vk
 		image_view(VkDevice dev, vk::image* resource,
 			const VkComponentMapping mapping = { VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A },
 			const VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1})
-			: m_device(dev)
+			: m_device(dev), m_resource(resource)
 		{
 			info.format = resource->info.format;
 			info.image = resource->value;
@@ -786,11 +796,17 @@ namespace vk
 #endif
 		}
 
+		vk::image* image() const
+		{
+			return m_resource;
+		}
+
 		image_view(const image_view&) = delete;
 		image_view(image_view&&) = delete;
 
 	private:
 		VkDevice m_device;
+		vk::image* m_resource = nullptr;
 
 		void create_impl()
 		{
@@ -1152,6 +1168,14 @@ namespace vk
 		}
 		access_hint = flush_only;
 
+		enum command_buffer_data_flag : u32
+		{
+			cb_has_occlusion_task = 1,
+			cb_has_blit_transfer = 2,
+			cb_has_dma_transfer = 4
+		};
+		u32 flags = 0;
+
 	public:
 		command_buffer() {}
 		~command_buffer() {}
@@ -1190,9 +1214,24 @@ namespace vk
 			return *pool;
 		}
 
+		void clear_flags()
+		{
+			flags = 0;
+		}
+
+		void set_flag(command_buffer_data_flag flag)
+		{
+			flags |= flag;
+		}
+
 		operator VkCommandBuffer() const
 		{
 			return commands;
+		}
+
+		bool is_recording() const
+		{
+			return is_open;
 		}
 
 		void begin()
@@ -1257,6 +1296,8 @@ namespace vk
 			acquire_global_submit_lock();
 			CHECK_RESULT(vkQueueSubmit(queue, 1, &infos, fence));
 			release_global_submit_lock();
+
+			clear_flags();
 		}
 	};
 
@@ -1865,11 +1906,7 @@ public:
 			{
 				// List of preferred modes in decreasing desirability
 				// NOTE: Always picks "triple-buffered vsync" types if possible
-				if (g_cfg.video.vsync)
-				{
-					preferred_modes = { VK_PRESENT_MODE_MAILBOX_KHR };
-				}
-				else
+				if (!g_cfg.video.vsync)
 				{
 					preferred_modes = { VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_FIFO_RELAXED_KHR };
 				}
@@ -1929,8 +1966,8 @@ public:
 			swap_info.oldSwapchain = old_swapchain;
 			swap_info.clipped = true;
 
-			swap_info.imageExtent.width = m_width;
-			swap_info.imageExtent.height = m_height;
+			swap_info.imageExtent.width = std::max(m_width, surface_descriptors.minImageExtent.width);
+			swap_info.imageExtent.height = std::max(m_height, surface_descriptors.minImageExtent.height);
 
 			createSwapchainKHR(dev, &swap_info, nullptr, &m_vk_swapchain);
 
@@ -2413,8 +2450,8 @@ public:
 		VkQueryPool query_pool = VK_NULL_HANDLE;
 		vk::render_device* owner = nullptr;
 
+		std::deque<u32> available_slots;
 		std::vector<bool> query_active_status;
-
 	public:
 
 		void create(vk::render_device &dev, u32 num_entries)
@@ -2428,6 +2465,12 @@ public:
 			owner = &dev;
 
 			query_active_status.resize(num_entries, false);
+			available_slots.resize(num_entries);
+
+			for (u32 n = 0; n < num_entries; ++n)
+			{
+				available_slots[n] = n;
+			}
 		}
 
 		void destroy()
@@ -2484,11 +2527,17 @@ public:
 
 		void reset_query(vk::command_buffer &cmd, u32 index)
 		{
-			vkCmdResetQueryPool(cmd, query_pool, index, 1);
-			query_active_status[index] = false;
+			if (query_active_status[index])
+			{
+				vkCmdResetQueryPool(cmd, query_pool, index, 1);
+
+				query_active_status[index] = false;
+				available_slots.push_back(index);
+			}
 		}
 
-		void reset_queries(vk::command_buffer &cmd, std::vector<u32> &list)
+		template<template<class> class _List>
+		void reset_queries(vk::command_buffer &cmd, _List<u32> &list)
 		{
 			for (const auto index : list)
 				reset_query(cmd, index);
@@ -2505,13 +2554,16 @@ public:
 
 		u32 find_free_slot()
 		{
-			for (u32 n = 0; n < query_active_status.size(); n++)
+			if (available_slots.empty())
 			{
-				if (query_active_status[n] == false)
-					return n;
+				return ~0u;
 			}
 
-			return UINT32_MAX;
+			u32 result = available_slots.front();
+			available_slots.pop_front();
+
+			verify(HERE), !query_active_status[result];
+			return result;
 		}
 	};
 
@@ -2702,12 +2754,14 @@ public:
 
 	namespace glsl
 	{
-		enum program_input_type
+		enum program_input_type : u32
 		{
 			input_type_uniform_buffer = 0,
 			input_type_texel_buffer = 1,
 			input_type_texture = 2,
-			input_type_storage_buffer = 3
+			input_type_storage_buffer = 3,
+
+			input_type_max_enum = 4
 		};
 
 		struct bound_sampler
@@ -2733,7 +2787,7 @@ public:
 			bound_buffer as_buffer;
 			bound_sampler as_sampler;
 
-			int location;
+			u32 location;
 			std::string name;
 		};
 
@@ -2813,8 +2867,14 @@ public:
 
 		class program
 		{
-			std::vector<program_input> uniforms;
+			std::array<std::vector<program_input>, input_type_max_enum> uniforms;
 			VkDevice m_device;
+
+			std::array<u32, 16> fs_texture_bindings;
+			std::array<u32, 16> fs_texture_mirror_bindings;
+			std::array<u32, 4>  vs_texture_bindings;
+			bool linked;
+
 		public:
 			VkPipeline pipeline;
 			u64 attribute_location_mask;
@@ -2826,11 +2886,13 @@ public:
 			~program();
 
 			program& load_uniforms(::glsl::program_domain domain, const std::vector<program_input>& inputs);
+			program& link();
 
-			bool has_uniform(std::string uniform_name);
-			void bind_uniform(const VkDescriptorImageInfo &image_descriptor, std::string uniform_name, VkDescriptorSet &descriptor_set);
+			bool has_uniform(program_input_type type, const std::string &uniform_name);
+			void bind_uniform(const VkDescriptorImageInfo &image_descriptor, const std::string &uniform_name, VkDescriptorSet &descriptor_set);
+			void bind_uniform(const VkDescriptorImageInfo &image_descriptor, int texture_unit, ::glsl::program_domain domain, VkDescriptorSet &descriptor_set, bool is_stencil_mirror = false);
 			void bind_uniform(const VkDescriptorBufferInfo &buffer_descriptor, uint32_t binding_point, VkDescriptorSet &descriptor_set);
-			void bind_uniform(const VkBufferView &buffer_view, const std::string &binding_name, VkDescriptorSet &descriptor_set);
+			void bind_uniform(const VkBufferView &buffer_view, program_input_type type, const std::string &binding_name, VkDescriptorSet &descriptor_set);
 
 			void bind_buffer(const VkDescriptorBufferInfo &buffer_descriptor, uint32_t binding_point, VkDescriptorType type, VkDescriptorSet &descriptor_set);
 
@@ -2838,7 +2900,7 @@ public:
 		};
 	}
 
-	struct vk_data_heap : public data_heap
+	struct data_heap : public ::data_heap
 	{
 		std::unique_ptr<buffer> heap;
 		bool mapped = false;
@@ -2853,7 +2915,7 @@ public:
 
 		void create(VkBufferUsageFlags usage, size_t size, const char *name = "unnamed", size_t guard = 0x10000)
 		{
-			data_heap::init(size, name, guard);
+			::data_heap::init(size, name, guard);
 
 			const auto device = get_current_renderer();
 			const auto memory_map = device->get_memory_mapping();
@@ -2937,5 +2999,10 @@ public:
 						VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
 			}
 		}
+	};
+
+	struct blitter
+	{
+		void scale_image(vk::command_buffer& cmd, vk::image* src, vk::image* dst, areai src_area, areai dst_area, bool interpolate, bool /*is_depth*/, const rsx::typeless_xfer& xfer_info);
 	};
 }

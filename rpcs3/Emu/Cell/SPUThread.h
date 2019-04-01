@@ -1,8 +1,9 @@
-#pragma once
+﻿#pragma once
 
 #include "Emu/Cell/Common.h"
 #include "Emu/CPU/CPUThread.h"
 #include "Emu/Cell/SPUInterpreter.h"
+#include "Emu/Memory/vm.h"
 #include "MFC.h"
 
 #include <map>
@@ -11,10 +12,8 @@ struct lv2_event_queue;
 struct lv2_spu_group;
 struct lv2_int_tag;
 
-class SPUThread;
-
 // JIT Block
-using spu_function_t = void(*)(SPUThread&, void*, u8*);
+using spu_function_t = void(*)(spu_thread&, void*, u8*);
 
 // SPU Channels
 enum : u32
@@ -246,12 +245,7 @@ public:
 
 	void set_value(u32 value, bool count = true)
 	{
-		const u64 new_data = u64{count} << off_count | value;
-#ifdef _MSC_VER
-		const_cast<volatile u64&>(data.raw()) = new_data;
-#else
-		__atomic_store_n(&data.raw(), new_data, __ATOMIC_RELAXED);
-#endif
+		data.release(u64{count} << off_count | value);
 	}
 
 	u32 get_value()
@@ -282,8 +276,8 @@ struct spu_channel_4_t
 public:
 	void clear()
 	{
-		values.store({});
-		value3 = 0;
+		values.release({});
+		value3.release(0);
 	}
 
 	// push unconditionally (overwriting latest value), returns true if needs signaling
@@ -370,8 +364,8 @@ struct spu_int_ctrl_t
 
 	void clear()
 	{
-		mask = 0;
-		stat = 0;
+		mask.release(0);
+		stat.release(0);
 		tag = nullptr;
 	}
 };
@@ -500,24 +494,23 @@ public:
 	}
 };
 
-class SPUThread : public cpu_thread
+class spu_thread : public cpu_thread
 {
 public:
-	virtual void on_spawn() override;
-	virtual void on_init(const std::shared_ptr<void>&) override;
 	virtual std::string get_name() const override;
 	virtual std::string dump() const override;
-	virtual void cpu_task() override;
+	virtual void cpu_task() override final;
 	virtual void cpu_mem() override;
 	virtual void cpu_unmem() override;
-	virtual ~SPUThread() override;
+	virtual ~spu_thread() override;
 	void cpu_init();
+	void cpu_stop();
 
 	static const u32 id_base = 0x02000000; // TODO (used to determine thread type)
 	static const u32 id_step = 1;
 	static const u32 id_count = 2048;
 
-	SPUThread(const std::string& name, u32 index, lv2_spu_group* group);
+	spu_thread(vm::addr_t ls, lv2_spu_group* group, u32 index, std::string_view name);
 
 	u32 pc = 0;
 
@@ -578,15 +571,13 @@ public:
 	const u32 offset; // SPU LS offset
 	lv2_spu_group* const group; // SPU Thread Group
 
-	const std::string m_name; // Thread name
+	lf_value<std::string> spu_name; // Thread name
 
 	std::unique_ptr<class spu_recompiler_base> jit; // Recompiler instance
 
 	u64 block_counter = 0;
 	u64 block_recover = 0;
 	u64 block_failure = 0;
-
-	std::array<spu_function_t, 0x10000> jit_dispatcher; // Dispatch table for indirect calls
 
 	std::array<v128, 0x4000> stack_mirror; // Return address information
 
@@ -598,7 +589,7 @@ public:
 	void do_mfc(bool wait = true);
 	u32 get_mfc_completed();
 
-	bool process_mfc_cmd(spu_mfc_cmd args);
+	bool process_mfc_cmd();
 	u32 get_events(bool waiting = false);
 	void set_events(u32 mask);
 	void set_interrupt_status(bool enable);
@@ -622,5 +613,21 @@ public:
 	inline to_be_t<T>& _ref(u32 lsa)
 	{
 		return *_ptr<T>(lsa);
+	}
+
+	bool read_reg(const u32 addr, u32& value);
+	bool write_reg(const u32 addr, const u32 value);
+
+	static atomic_t<u32> g_raw_spu_ctr;
+	static atomic_t<u32> g_raw_spu_id[5];
+
+	static u32 find_raw_spu(u32 id)
+	{
+		if (LIKELY(id < std::size(g_raw_spu_id)))
+		{
+			return g_raw_spu_id[id];
+		}
+
+		return -1;
 	}
 };

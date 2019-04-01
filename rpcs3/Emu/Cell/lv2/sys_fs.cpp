@@ -1,4 +1,5 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
+#include "sys_sync.h"
 #include "sys_fs.h"
 
 #include <mutex>
@@ -230,6 +231,11 @@ error_code sys_fs_open(vm::cptr<char> path, s32 flags, vm::ptr<u32> fd, s32 mode
 	if (flags & CELL_FS_O_CREAT)
 	{
 		open_mode += fs::create;
+
+		if (flags & CELL_FS_O_EXCL)
+		{
+			open_mode += fs::excl;
+		}
 	}
 
 	if (flags & CELL_FS_O_TRUNC)
@@ -240,18 +246,6 @@ error_code sys_fs_open(vm::cptr<char> path, s32 flags, vm::ptr<u32> fd, s32 mode
 	if (flags & CELL_FS_O_APPEND)
 	{
 		open_mode += fs::append;
-	}
-
-	if (flags & CELL_FS_O_EXCL)
-	{
-		if (flags & CELL_FS_O_CREAT)
-		{
-			open_mode += fs::excl;
-		}
-		else
-		{
-			open_mode = {}; // error
-		}
 	}
 
 	if (flags & CELL_FS_O_MSELF)
@@ -744,7 +738,7 @@ error_code sys_fs_mkdir(vm::cptr<char> path, s32 mode)
 		return {CELL_ENOTMOUNTED, path};
 	}
 
-	if (!fs::create_path(local_path))
+	if (!fs::create_dir(local_path))
 	{
 		switch (auto error = fs::g_tls_error)
 		{
@@ -989,12 +983,16 @@ error_code sys_fs_fcntl(u32 fd, u32 op, vm::ptr<void> _arg, u32 _size)
 		const auto arg = vm::static_ptr_cast<lv2_file_c0000002>(_arg);
 
 		const std::string_view vpath = arg->path.get_ptr();
-		const std::string local_path = vfs::get(vpath);
+		const std::size_t non_slash = vpath.find_first_not_of('/');
 
-		if (vpath.find_first_not_of('/') == -1)
+		if (non_slash == -1)
 		{
 			return {CELL_EPERM, vpath};
 		}
+
+		// Extract device from path
+		const std::string_view device_path = vpath.substr(0, vpath.find_first_of('/', non_slash));
+		const std::string local_path = vfs::get(device_path);
 
 		if (local_path.empty())
 		{
@@ -1290,7 +1288,7 @@ error_code sys_fs_lseek(u32 fd, s64 offset, s32 whence, vm::ptr<u64> pos)
 	return CELL_OK;
 }
 
-error_code sys_fs_fdatasync(u32 fd)
+error_code sys_fs_fdatasync(ppu_thread& ppu, u32 fd)
 {
 	sys_fs.trace("sys_fs_fdadasync(fd=%d)", fd);
 
@@ -1301,12 +1299,12 @@ error_code sys_fs_fdatasync(u32 fd)
 		return CELL_EBADF;
 	}
 
+	lv2_obj::sleep(ppu);
 	file->file.sync();
-
 	return CELL_OK;
 }
 
-error_code sys_fs_fsync(u32 fd)
+error_code sys_fs_fsync(ppu_thread& ppu, u32 fd)
 {
 	sys_fs.trace("sys_fs_fsync(fd=%d)", fd);
 
@@ -1317,8 +1315,8 @@ error_code sys_fs_fsync(u32 fd)
 		return CELL_EBADF;
 	}
 
+	lv2_obj::sleep(ppu);
 	file->file.sync();
-
 	return CELL_OK;
 }
 

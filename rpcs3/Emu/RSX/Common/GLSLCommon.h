@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <sstream>
 
 #include "ShaderParam.h"
@@ -161,26 +161,25 @@ namespace glsl
 		OS <<
 		"struct attribute_desc\n"
 		"{\n"
-		"	int type;\n"
-		"	int attribute_size;\n"
-		"	int starting_offset;\n"
-		"	int stride;\n"
-		"	int swap_bytes;\n"
-		"	int is_volatile;\n"
-		"	int frequency;\n"
-		"	int divisor;\n"
-		"	int modulo;\n"
+		"	uint type;\n"
+		"	uint attribute_size;\n"
+		"	uint starting_offset;\n"
+		"	uint stride;\n"
+		"	uint frequency;\n"
+		"	bool swap_bytes;\n"
+		"	bool is_volatile;\n"
+		"	bool modulo;\n"
 		"};\n\n"
 
-		"uint get_bits(uvec4 v, int swap)\n"
+		"uint get_bits(uvec4 v, bool swap)\n"
 		"{\n"
-		"	if (swap != 0) return (v.w | v.z << 8 | v.y << 16 | v.x << 24);\n"
+		"	if (swap) return (v.w | v.z << 8 | v.y << 16 | v.x << 24);\n"
 		"	return (v.x | v.y << 8 | v.z << 16 | v.w << 24);\n"
 		"}\n\n"
 
-		"uint get_bits(uvec2 v, int swap)\n"
+		"uint get_bits(uvec2 v, bool swap)\n"
 		"{\n"
-		"	if (swap != 0) return (v.y | v.x << 8);\n"
+		"	if (swap) return (v.y | v.x << 8);\n"
 		"	return (v.x | v.y << 8);\n"
 		"}\n\n"
 
@@ -208,11 +207,24 @@ namespace glsl
 			"		case 3: vector.w = scalar; return;\n"
 			"	}\n"
 			"}\n";
+
+			OS <<
+			"uint ref(in uvec4 vector, in int index)\n"
+			"{\n"
+			"	switch(index)\n"
+			"	{\n"
+			"		case 0: return vector.x;\n"
+			"		case 1: return vector.y;\n"
+			"		case 2: return vector.z;\n"
+			"		case 3: return vector.w;\n"
+			"	}\n"
+			"}\n";
 		}
 		else
 		{
 			OS <<
-			"#define mov(v, i, s) v[i] = s\n";
+			"#define mov(v, i, s) v[i] = s\n"
+			"#define ref(v, i) v[i]\n";
 		}
 
 		OS <<
@@ -224,7 +236,7 @@ namespace glsl
 		"	uint bits;\n"
 		"	bool reverse_order = false;\n"
 		"\n"
-		"	int first_byte = (vertex_id * desc.stride) + desc.starting_offset;\n"
+		"	int first_byte = int((vertex_id * desc.stride) + desc.starting_offset);\n"
 		"	for (int n = 0; n < 4; n++)\n"
 		"	{\n"
 		"		if (n == desc.attribute_size) break;\n"
@@ -256,7 +268,7 @@ namespace glsl
 		"			//unsigned byte\n"
 		"			mov(result, n, texelFetch(input_stream, first_byte++).x);\n"
 		"			mov(scale, n, 255.);\n"
-		"			reverse_order = (desc.swap_bytes != 0);\n"
+		"			reverse_order = desc.swap_bytes;\n"
 		"			break;\n"
 		"		case 4:\n"
 		"			//signed word\n"
@@ -280,7 +292,7 @@ namespace glsl
 		"		case 6:\n"
 		"			//ub256\n"
 		"			mov(result, n, float(texelFetch(input_stream, first_byte++).x));\n"
-		"			reverse_order = (desc.swap_bytes != 0);\n"
+		"			reverse_order = desc.swap_bytes;\n"
 		"			break;\n"
 		"		}\n"
 		"	}\n\n"
@@ -290,17 +302,29 @@ namespace glsl
 
 		"attribute_desc fetch_desc(int location)\n"
 		"{\n"
+		"	// Each descriptor is 64 bits wide\n"
+		"	// [0-8] attribute stride\n"
+		"	// [8-24] attribute divisor\n"
+		"	// [24-27] attribute type\n"
+		"	// [27-30] attribute size\n"
+		"	// [30-31] reserved\n"
+		"	// [32-60] starting offset\n"
+		"	// [60-61] swap bytes flag\n"
+		"	// [61-62] volatile flag\n"
+		"	// [62-63] modulo enable flag\n"
+		"	int block = (location >> 1);\n"
+		"	int sub_block = (location & 1) << 1;\n"
+		"	uint attrib0 = ref(input_attributes_blob[block], sub_block + 0);\n"
+		"	uint attrib1 = ref(input_attributes_blob[block], sub_block + 1);\n"
 		"	attribute_desc result;\n"
-		"	int attribute_flags = input_attributes[location].w;\n"
-		"	result.type = input_attributes[location].x;\n"
-		"	result.attribute_size = input_attributes[location].y;\n"
-		"	result.starting_offset = input_attributes[location].z;\n"
-		"	result.stride = attribute_flags & 0xFF;\n"
-		"	result.swap_bytes = (attribute_flags >> 8) & 0x1;\n"
-		"	result.is_volatile = (attribute_flags >> 9) & 0x1;\n"
-		"	result.frequency = (attribute_flags >> 10) & 0x3;\n"
-		"	result.modulo = (attribute_flags >> 12) & 0x1;\n"
-		"	result.divisor = (attribute_flags >> 13) & 0xFFFF;\n"
+		"	result.stride = attrib0 & 0xFF;\n"
+		"	result.frequency = (attrib0 >> 8) & 0xFFFF;\n"
+		"	result.type = (attrib0 >> 24) & 0x7;\n"
+		"	result.attribute_size = (attrib0 >> 27) & 0x7;\n"
+		"	result.starting_offset = (attrib1 & 0x1FFFFFFF);\n"
+		"	result.swap_bytes = ((attrib1 >> 29) & 0x1) != 0;\n"
+		"	result.is_volatile = ((attrib1 >> 30) & 0x1) != 0;\n"
+		"	result.modulo = ((attrib1 >> 31) & 0x1) != 0;\n"
 		"	return result;\n"
 		"}\n\n"
 
@@ -325,17 +349,23 @@ namespace glsl
 		"	}\n\n"
 		"	int vertex_id = " << vertex_id_name << " - int(vertex_base_index);\n"
 		"	if (desc.frequency == 0)\n"
+		"	{\n"
 		"		vertex_id = 0;\n"
+		"	}\n"
 		"	else if (desc.frequency > 1)\n"
 		"	{\n"
 		"		//if a vertex modifier is active; vertex_base must be 0 and is ignored\n"
-		"		if (desc.modulo != 0)\n"
-		"			vertex_id = " << vertex_id_name << " % desc.divisor;\n"
+		"		if (desc.modulo)\n"
+		"		{\n"
+		"			vertex_id = (" << vertex_id_name << " + int(vertex_index_offset)) % int(desc.frequency);\n"
+		"		}\n"
 		"		else\n"
-		"			vertex_id = " << vertex_id_name << " / desc.divisor;\n"
+		"		{\n"
+		"			vertex_id = vertex_id / int(desc.frequency); \n"
+		"		}\n"
 		"	}\n"
 		"\n"
-		"	if (desc.is_volatile != 0)\n"
+		"	if (desc.is_volatile)\n"
 		"		return fetch_attribute(desc, vertex_id, volatile_input_stream);\n"
 		"	else\n"
 		"		return fetch_attribute(desc, vertex_id, persistent_input_stream);\n"
@@ -353,10 +383,15 @@ namespace glsl
 		OS <<
 		"	if ((rop_control & 0xFF) != 0)\n"
 		"	{\n"
-		"		bool alpha_test = (rop_control & 0x11) > 0;\n"
+		"		bool alpha_test = (rop_control & 0x1) > 0;\n"
 		"		uint alpha_func = ((rop_control >> 16) & 0x7);\n"
 		"		bool srgb_convert = (rop_control & 0x2) > 0;\n\n"
+		"		bool a2c_enabled = (rop_control & 0x10) > 0;\n"
 		"		if (alpha_test && !comparison_passes(" << reg0 << ".a, alpha_ref, alpha_func))\n"
+		"		{\n"
+		"			discard;\n"
+		"		}\n"
+		"		else if (a2c_enabled && !coverage_test_passes(" << reg0 << ", rop_control >> 5))\n"
 		"		{\n"
 		"			discard;\n"
 		"		}\n";
@@ -385,6 +420,10 @@ namespace glsl
 
 	static void insert_glsl_legacy_function(std::ostream& OS, glsl::program_domain domain, bool require_lit_emulation, bool require_depth_conversion = false, bool require_wpos = false, bool require_texture_ops = true)
 	{
+		OS << "#define _select mix\n";
+		OS << "#define _saturate(x) clamp(x, 0., 1.)\n";
+		OS << "#define _rand(seed) fract(sin(dot(seed.xy, vec2(12.9898f, 78.233f))) * 43758.5453f)\n\n";
+
 		if (require_lit_emulation)
 		{
 			OS <<
@@ -424,6 +463,23 @@ namespace glsl
 
 		program_common::insert_compare_op(OS);
 
+		// NOTES:
+		// Lowers alpha accuracy down to 2 bits, to mimic A2C banding
+		// Alpha lower than the real threshold (e.g 0.25 for 4 samples) gets a randomized chance to make it to the lowest transparency state
+		// Helps to avoid A2C tested foliage disappearing in the distance
+		OS <<
+		"bool coverage_test_passes(inout vec4 _sample, uint control)\n"
+		"{\n"
+		"	if ((control & 0x1) == 0) return false;\n"
+		"\n"
+		"	float samples = ((control & 0x2) != 0)? 4.f : 2.f;\n"
+		"	float hash    = _saturate(_rand(gl_FragCoord) + 0.5f) * 0.9f;\n"
+		"	float epsilon = hash / samples;\n"
+		"	float alpha   = trunc((_sample.a + epsilon) * samples) / samples;\n"
+		"	//_sample.a     = min(_sample.a, alpha);\n" // Cannot blend A2C samples naively as they are order independent! Causes background bleeding
+		"	return (alpha > 0.f);\n"
+		"}\n\n";
+
 		if (require_depth_conversion)
 		{
 			//NOTE: Memory layout is fetched as byteswapped BGRA [GBAR] (GOW collection, DS2, DeS)
@@ -449,9 +505,10 @@ namespace glsl
 			"	}\n"
 			"}\n\n"
 
-			"vec4 texture2DReconstruct(sampler2D tex, vec2 coord, float remap)\n"
+			"vec4 texture2DReconstruct(sampler2D tex, usampler2D stencil_tex, vec2 coord, float remap)\n"
 			"{\n"
 			"	vec4 result = decodeLinearDepth(texture(tex, coord.xy).r);\n"
+			"	result.z = float(texture(stencil_tex, coord.xy).x) / 255.f;\n"
 			"	uint remap_vector = floatBitsToUint(remap) & 0xFF;\n"
 			"	if (remap_vector == 0xE4) return result;\n\n"
 			"	vec4 tmp;\n"
@@ -523,27 +580,30 @@ namespace glsl
 			"	return rgba;\n"
 			"}\n\n"
 
-			"#define TEX1D(index, tex, coord1) process_texel(texture(tex, coord1 * texture_parameters[index].x), floatBitsToUint(texture_parameters[index].w))\n"
-			"#define TEX1D_BIAS(index, tex, coord1, bias) process_texel(texture(tex, coord1 * texture_parameters[index].x, bias), floatBitsToUint(texture_parameters[index].w))\n"
-			"#define TEX1D_LOD(index, tex, coord1, lod) process_texel(textureLod(tex, coord1 * texture_parameters[index].x, lod), floatBitsToUint(texture_parameters[index].w))\n"
-			"#define TEX1D_GRAD(index, tex, coord1, dpdx, dpdy) process_texel(textureGrad(tex, coord1 * texture_parameters[index].x, dpdx, dpdy), floatBitsToUint(texture_parameters[index].w))\n"
-			"#define TEX1D_PROJ(index, tex, coord2) process_texel(textureProj(tex, coord2 * vec2(texture_parameters[index].x, 1.)), floatBitsToUint(texture_parameters[index].w))\n"
+			"#define TEX_NAME(index) tex##index\n"
+			"#define TEX_NAME_STENCIL(index) tex##index##_stencil\n\n"
 
-			"#define TEX2D(index, tex, coord2) process_texel(texture(tex, coord2 * texture_parameters[index].xy), floatBitsToUint(texture_parameters[index].w))\n"
-			"#define TEX2D_BIAS(index, tex, coord2, bias) process_texel(texture(tex, coord2 * texture_parameters[index].xy, bias), floatBitsToUint(texture_parameters[index].w))\n"
-			"#define TEX2D_LOD(index, tex, coord2, lod) process_texel(textureLod(tex, coord2 * texture_parameters[index].xy, lod), floatBitsToUint(texture_parameters[index].w))\n"
-			"#define TEX2D_GRAD(index, tex, coord2, dpdx, dpdy) process_texel(textureGrad(tex, coord2 * texture_parameters[index].xy, dpdx, dpdy), floatBitsToUint(texture_parameters[index].w))\n"
-			"#define TEX2D_PROJ(index, tex, coord4) process_texel(textureProj(tex, coord4 * vec4(texture_parameters[index].xy, 1., 1.)), floatBitsToUint(texture_parameters[index].w))\n"
+			"#define TEX1D(index, coord1) process_texel(texture(TEX_NAME(index), coord1 * texture_parameters[index].x), floatBitsToUint(texture_parameters[index].w))\n"
+			"#define TEX1D_BIAS(index, coord1, bias) process_texel(texture(TEX_NAME(index), coord1 * texture_parameters[index].x, bias), floatBitsToUint(texture_parameters[index].w))\n"
+			"#define TEX1D_LOD(index, coord1, lod) process_texel(textureLod(TEX_NAME(index), coord1 * texture_parameters[index].x, lod), floatBitsToUint(texture_parameters[index].w))\n"
+			"#define TEX1D_GRAD(index, coord1, dpdx, dpdy) process_texel(textureGrad(TEX_NAME(index), coord1 * texture_parameters[index].x, dpdx, dpdy), floatBitsToUint(texture_parameters[index].w))\n"
+			"#define TEX1D_PROJ(index, coord2) process_texel(textureProj(TEX_NAME(index), coord2 * vec2(texture_parameters[index].x, 1.)), floatBitsToUint(texture_parameters[index].w))\n"
 
-			"#define TEX2D_DEPTH_RGBA8(index, tex, coord2) process_texel(texture2DReconstruct(tex, coord2 * texture_parameters[index].xy, texture_parameters[index].z), floatBitsToUint(texture_parameters[index].w))\n"
-			"#define TEX2D_SHADOW(index, tex, coord3) texture(tex, coord3 * vec3(texture_parameters[index].xy, 1.))\n"
-			"#define TEX2D_SHADOWPROJ(index, tex, coord4) textureProj(tex, coord4 * vec4(texture_parameters[index].xy, 1., 1.))\n"
+			"#define TEX2D(index, coord2) process_texel(texture(TEX_NAME(index), coord2 * texture_parameters[index].xy), floatBitsToUint(texture_parameters[index].w))\n"
+			"#define TEX2D_BIAS(index, coord2, bias) process_texel(texture(TEX_NAME(index), coord2 * texture_parameters[index].xy, bias), floatBitsToUint(texture_parameters[index].w))\n"
+			"#define TEX2D_LOD(index, coord2, lod) process_texel(textureLod(TEX_NAME(index), coord2 * texture_parameters[index].xy, lod), floatBitsToUint(texture_parameters[index].w))\n"
+			"#define TEX2D_GRAD(index, coord2, dpdx, dpdy) process_texel(textureGrad(TEX_NAME(index), coord2 * texture_parameters[index].xy, dpdx, dpdy), floatBitsToUint(texture_parameters[index].w))\n"
+			"#define TEX2D_PROJ(index, coord4) process_texel(textureProj(TEX_NAME(index), coord4 * vec4(texture_parameters[index].xy, 1., 1.)), floatBitsToUint(texture_parameters[index].w))\n"
 
-			"#define TEX3D(index, tex, coord3) process_texel(texture(tex, coord3), floatBitsToUint(texture_parameters[index].w))\n"
-			"#define TEX3D_BIAS(index, tex, coord3, bias) process_texel(texture(tex, coord3, bias), floatBitsToUint(texture_parameters[index].w))\n"
-			"#define TEX3D_LOD(index, tex, coord3, lod) process_texel(textureLod(tex, coord3, lod), floatBitsToUint(texture_parameters[index].w))\n"
-			"#define TEX3D_GRAD(index, tex, coord3, dpdx, dpdy) process_texel(textureGrad(tex, coord3, dpdx, dpdy), floatBitsToUint(texture_parameters[index].w))\n"
-			"#define TEX3D_PROJ(index, tex, coord4) process_texel(textureProj(tex, coord4), floatBitsToUint(texture_parameters[index].w))\n\n";
+			"#define TEX2D_DEPTH_RGBA8(index, coord2) process_texel(texture2DReconstruct(TEX_NAME(index), TEX_NAME_STENCIL(index), coord2 * texture_parameters[index].xy, texture_parameters[index].z), floatBitsToUint(texture_parameters[index].w))\n"
+			"#define TEX2D_SHADOW(index, coord3) texture(TEX_NAME(index), coord3 * vec3(texture_parameters[index].xy, 1.))\n"
+			"#define TEX2D_SHADOWPROJ(index, coord4) textureProj(TEX_NAME(index), coord4 * vec4(texture_parameters[index].xy, 1., 1.))\n"
+
+			"#define TEX3D(index, coord3) process_texel(texture(TEX_NAME(index), coord3), floatBitsToUint(texture_parameters[index].w))\n"
+			"#define TEX3D_BIAS(index, coord3, bias) process_texel(texture(TEX_NAME(index), coord3, bias), floatBitsToUint(texture_parameters[index].w))\n"
+			"#define TEX3D_LOD(index, coord3, lod) process_texel(textureLod(TEX_NAME(index), coord3, lod), floatBitsToUint(texture_parameters[index].w))\n"
+			"#define TEX3D_GRAD(index, coord3, dpdx, dpdy) process_texel(textureGrad(TEX_NAME(index), coord3, dpdx, dpdy), floatBitsToUint(texture_parameters[index].w))\n"
+			"#define TEX3D_PROJ(index, coord4) process_texel(textureProj(TEX_NAME(index), coord4), floatBitsToUint(texture_parameters[index].w))\n\n";
 		}
 
 		if (require_wpos)
@@ -587,49 +647,49 @@ namespace glsl
 		case FUNCTION::FUNCTION_REFL:
 			return "vec4($0 - 2.0 * (dot($0, $1)) * $1)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLE1D:
-			return "TEX1D($_i, $t, $0.x)";
+			return "TEX1D($_i, $0.x)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLE1D_BIAS:
-			return "TEX1D_BIAS($_i, $t, $0.x, $1.x)";
+			return "TEX1D_BIAS($_i, $0.x, $1.x)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLE1D_PROJ:
-			return "TEX1D_PROJ($_i, $t, $0.xy)";
+			return "TEX1D_PROJ($_i, $0.xy)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLE1D_LOD:
-			return "TEX1D_LOD($_i, $t, $0.x, $1.x)";
+			return "TEX1D_LOD($_i, $0.x, $1.x)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLE1D_GRAD:
-			return "TEX1D_GRAD($_i, $t, $0.x, $1.x, $2.x)";
+			return "TEX1D_GRAD($_i, $0.x, $1.x, $2.x)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLE2D:
-			return "TEX2D($_i, $t, $0.xy)";
+			return "TEX2D($_i, $0.xy)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLE2D_BIAS:
-			return "TEX2D_BIAS($_i, $t, $0.xy, $1.x)";
+			return "TEX2D_BIAS($_i, $0.xy, $1.x)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLE2D_PROJ:
-			return "TEX2D_PROJ($_i, $t, $0)";
+			return "TEX2D_PROJ($_i, $0)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLE2D_LOD:
-			return "TEX2D_LOD($_i, $t, $0.xy, $1.x)";
+			return "TEX2D_LOD($_i, $0.xy, $1.x)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLE2D_GRAD:
-			return "TEX2D_GRAD($_i, $t, $0.xy, $1.xy, $2.xy)";
+			return "TEX2D_GRAD($_i, $0.xy, $1.xy, $2.xy)";
 		case FUNCTION::FUNCTION_TEXTURE_SHADOW2D:
-			return "TEX2D_SHADOW($_i, $t, $0.xyz)";
+			return "TEX2D_SHADOW($_i, $0.xyz)";
 		case FUNCTION::FUNCTION_TEXTURE_SHADOW2D_PROJ:
-			return "TEX2D_SHADOWPROJ($_i, $t, $0)";
+			return "TEX2D_SHADOWPROJ($_i, $0)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLECUBE:
-			return "TEX3D($_i, $t, $0.xyz)";
+			return "TEX3D($_i, $0.xyz)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLECUBE_BIAS:
-			return "TEX3D_BIAS($_i, $t, $0.xyz, $1.x)";
+			return "TEX3D_BIAS($_i, $0.xyz, $1.x)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLECUBE_PROJ:
-			return "TEX3D($_i, $t, ($0.xyz / $0.w))";
+			return "TEX3D($_i, ($0.xyz / $0.w))";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLECUBE_LOD:
-			return "TEX3D_LOD($_i, $t, $0.xyz, $1.x)";
+			return "TEX3D_LOD($_i, $0.xyz, $1.x)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLECUBE_GRAD:
-			return "TEX3D_GRAD($_i, $t, $0.xyz, $1.xyz, $2.xyz)";
+			return "TEX3D_GRAD($_i, $0.xyz, $1.xyz, $2.xyz)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLE3D:
-			return "TEX3D($_i, $t, $0.xyz)";
+			return "TEX3D($_i, $0.xyz)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLE3D_BIAS:
-			return "TEX3D_BIAS($_i, $t, $0.xyz, $1.x)";
+			return "TEX3D_BIAS($_i, $0.xyz, $1.x)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLE3D_PROJ:
-			return "TEX3D_PROJ($_i, $t, $0)";
+			return "TEX3D_PROJ($_i, $0)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLE3D_LOD:
-			return "TEX3D_LOD($_i, $t, $0.xyz, $1.x)";
+			return "TEX3D_LOD($_i, $0.xyz, $1.x)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLE3D_GRAD:
-			return "TEX3D_GRAD($_i, $t, $0.xyz, $1.xyz, $2.xyz)";
+			return "TEX3D_GRAD($_i, $0.xyz, $1.xyz, $2.xyz)";
 		case FUNCTION::FUNCTION_DFDX:
 			return "dFdx($0)";
 		case FUNCTION::FUNCTION_DFDY:
@@ -642,7 +702,7 @@ namespace glsl
 		case FUNCTION::FUNCTION_VERTEX_TEXTURE_FETCHCUBE:
 			return "textureLod($t, $0.xyz, 0)";
 		case FUNCTION::FUNCTION_TEXTURE_SAMPLE2D_DEPTH_RGBA:
-			return "TEX2D_DEPTH_RGBA8($_i, $t, $0.xy)";
+			return "TEX2D_DEPTH_RGBA8($_i, $0.xy)";
 		}
 	}
 }

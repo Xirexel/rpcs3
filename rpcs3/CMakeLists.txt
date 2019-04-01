@@ -3,9 +3,7 @@ cmake_minimum_required(VERSION 3.8.2)
 include(cotire)
 
 # Generate git-version.h at build time.
-add_custom_target(GitVersion ALL
-	COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
-	-P ${CMAKE_CURRENT_SOURCE_DIR}/git-version.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/git-version.cmake)
 
 # Check for a sufficient compiler and set build options
 include(ConfigureCompiler)
@@ -31,7 +29,7 @@ endif()
 # finds Qt libraries and setups custom commands for MOC and UIC
 # Must be done here because generated MOC and UIC targets cant
 # be found otherwise
-include(../3rdparty/qt5.cmake)
+include(${CMAKE_SOURCE_DIR}/3rdparty/qt5.cmake)
 
 # subdirectories
 add_subdirectory(Emu)
@@ -41,18 +39,23 @@ file(GLOB RPCS3_SRC "*.cpp")
 
 if(WIN32)
 	add_executable(rpcs3 WIN32 ${RPCS3_SRC})
+elseif(APPLE)
+	add_executable(rpcs3 MACOSX_BUNDLE ${RPCS3_SRC} "${RPCS3_SRC_DIR}/rpcs3.icns")
+	set_target_properties(rpcs3
+		PROPERTIES
+			MACOSX_BUNDLE_INFO_PLIST "${RPCS3_SRC_DIR}/rpcs3.plist.in")
 else()
 	add_executable(rpcs3 ${RPCS3_SRC})
 endif()
 
-add_dependencies(rpcs3 GitVersion)
+gen_git_version(${RPCS3_SRC_DIR})
 set_target_properties(rpcs3
 	PROPERTIES
 		AUTOMOC ON
 		AUTOUIC ON)
 
 target_link_libraries(rpcs3 rpcs3_emu rpcs3_ui)
-target_link_libraries(rpcs3 3rdparty::discord-rpc 3rdparty::qt5 3rdparty::hidapi)
+target_link_libraries(rpcs3 3rdparty::discord-rpc 3rdparty::qt5 3rdparty::hidapi 3rdparty::libusb)
 target_link_libraries(rpcs3 ${ADDITIONAL_LIBS})
 
 # Win resource file
@@ -60,11 +63,13 @@ if (WIN32)
 	target_sources(rpcs3 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/rpcs3.rc")
 endif()
 
-if(UNIX)
+if(UNIX AND NOT APPLE)
 	find_package(X11 REQUIRED)
 	target_include_directories(rpcs3 PUBLIC ${X11_INCLUDE_DIR})
 	target_link_libraries(rpcs3 ${X11_LIBRARIES})
+endif()
 
+if(UNIX)
 	set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
 	find_package(Threads REQUIRED)
 	target_link_libraries(rpcs3 Threads::Threads)
@@ -82,8 +87,17 @@ set_target_properties(rpcs3 PROPERTIES
 
 cotire(rpcs3)
 
-if (UNIX)
-	# Copy icons to executable directory
+# Copy icons to executable directory
+if(APPLE)
+	add_custom_command(TARGET rpcs3 POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E copy
+			${RPCS3_SRC_DIR}/rpcs3.icns $<TARGET_FILE_DIR:rpcs3>/../Resources/rpcs3.icns
+			COMMAND ${CMAKE_COMMAND} -E copy_directory
+			${CMAKE_SOURCE_DIR}/bin/Icons $<TARGET_FILE_DIR:rpcs3>/../Resources/Icons
+			COMMAND ${CMAKE_COMMAND} -E copy_directory
+			${CMAKE_SOURCE_DIR}/bin/GuiConfigs $<TARGET_FILE_DIR:rpcs3>/../Resources/GuiConfigs
+			COMMAND "${Qt5_DIR}/../../../bin/macdeployqt" "${PROJECT_BINARY_DIR}/bin/rpcs3.app")
+elseif(UNIX)
 	add_custom_command(TARGET rpcs3 POST_BUILD
 			COMMAND ${CMAKE_COMMAND} -E copy_directory
 			${CMAKE_SOURCE_DIR}/bin/Icons $<TARGET_FILE_DIR:rpcs3>/Icons)

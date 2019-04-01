@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "VFS.h"
 #include "Utilities/Atomic.h"
@@ -63,6 +63,7 @@ enum class pad_handler
 {
 	null,
 	keyboard,
+	ds3,
 	ds4,
 #ifdef _WIN32
 	xinput,
@@ -92,10 +93,10 @@ enum class audio_renderer
 #ifdef HAVE_ALSA
 	alsa,
 #endif
+	openal,
 #ifdef HAVE_PULSE
 	pulse,
 #endif
-	openal,
 };
 
 enum class camera_handler
@@ -170,6 +171,12 @@ enum class tsx_usage
 	forced,
 };
 
+enum enter_button_assign
+{
+	circle = 0, // CELL_SYSUTIL_ENTER_BUTTON_ASSIGN_CIRCLE
+	cross  = 1  // CELL_SYSUTIL_ENTER_BUTTON_ASSIGN_CROSS
+};
+
 enum CellNetCtlState : s32;
 enum CellSysutilLang : s32;
 
@@ -182,14 +189,17 @@ struct EmuCallbacks
 	std::function<void()> on_stop;
 	std::function<void()> on_ready;
 	std::function<void()> exit;
+	std::function<void()> reset_pads;
+	std::function<void(bool)> enable_pads;
 	std::function<void(s32, s32)> handle_taskbar_progress; // (type, value) type: 0 for reset, 1 for increment, 2 for set_limit
 	std::function<std::shared_ptr<class KeyboardHandlerBase>()> get_kb_handler;
 	std::function<std::shared_ptr<class MouseHandlerBase>()> get_mouse_handler;
 	std::function<std::shared_ptr<class pad_thread>()> get_pad_handler;
 	std::function<std::unique_ptr<class GSFrameBase>()> get_gs_frame;
 	std::function<std::shared_ptr<class GSRender>()> get_gs_render;
-	std::function<std::shared_ptr<class AudioThread>()> get_audio;
+	std::function<std::shared_ptr<class AudioBackend>()> get_audio;
 	std::function<std::shared_ptr<class MsgDialogBase>()> get_msg_dialog;
+	std::function<std::shared_ptr<class OskDialogBase>()> get_osk_dialog;
 	std::function<std::unique_ptr<class SaveDialogBase>()> get_save_dialog;
 	std::function<std::unique_ptr<class TrophyNotificationBase>()> get_trophy_notification_dialog;
 };
@@ -204,11 +214,11 @@ class Emulator final
 	atomic_t<u64> m_pause_amend_time; // increased when resumed
 
 	std::string m_path;
-	std::string m_cache_path;
 	std::string m_title_id;
 	std::string m_title;
 	std::string m_cat;
 	std::string m_dir;
+	std::string m_sfo_dir;
 	std::string m_usr{"00000001"};
 	u32 m_usrid{1};
 
@@ -269,14 +279,14 @@ public:
 		return m_cat;
 	}
 
-	const std::string& GetCachePath() const
-	{
-		return m_cache_path;
-	}
-
 	const std::string& GetDir() const
 	{
 		return m_dir;
+	}
+
+	const std::string& GetSfoDir() const
+	{
+		return m_sfo_dir;
 	}
 
 	// String for GUI dialogs.
@@ -298,18 +308,27 @@ public:
 		return m_pause_amend_time;
 	}
 
-	bool BootGame(const std::string& path, bool direct = false, bool add_only = false);
+	std::string PPUCache() const;
+
+	bool BootGame(const std::string& path, bool direct = false, bool add_only = false, bool force_global_config = false);
 	bool BootRsxCapture(const std::string& path);
 	bool InstallPkg(const std::string& path);
 
 private:
 	static std::string GetEmuDir();
+	static std::string GetHdd1Dir();
+
+	void LimitCacheSize();
 public:
 	static std::string GetHddDir();
+	static std::string GetSfoDirFromGamePath(const std::string& game_path, const std::string& user);
+
+	static std::string GetCustomConfigDir();
+	static std::string GetCustomConfigPath(const std::string& title_id, bool get_deprecated_path = false);
 
 	void SetForceBoot(bool force_boot);
 
-	void Load(bool add_only = false);
+	void Load(bool add_only = false, bool force_global_config = false);
 	void Run();
 	bool Pause();
 	void Resume();
@@ -339,7 +358,7 @@ struct cfg_root : cfg::node
 		node_core(cfg::node* _this) : cfg::node(_this, "Core") {}
 
 		cfg::_enum<ppu_decoder_type> ppu_decoder{this, "PPU Decoder", ppu_decoder_type::llvm};
-		cfg::_int<1, 16> ppu_threads{this, "PPU Threads", 2}; // Amount of PPU threads running simultaneously (must be 2)
+		cfg::_int<1, 4> ppu_threads{this, "PPU Threads", 2}; // Amount of PPU threads running simultaneously (must be 2)
 		cfg::_bool ppu_debug{this, "PPU Debug"};
 		cfg::_bool llvm_logs{this, "Save LLVM logs"};
 		cfg::string llvm_cpu{this, "Use LLVM CPU"};
@@ -352,7 +371,6 @@ struct cfg_root : cfg::node
 		cfg::_int<0, 6> preferred_spu_threads{this, "Preferred SPU Threads", 0}; //Numnber of hardware threads dedicated to heavy simultaneous spu tasks
 		cfg::_int<0, 16> spu_delay_penalty{this, "SPU delay penalty", 3}; //Number of milliseconds to block a thread if a virtual 'core' isn't free
 		cfg::_bool spu_loop_detection{this, "SPU loop detection", true}; //Try to detect wait loops and trigger thread yield
-		cfg::_bool spu_shared_runtime{this, "SPU Shared Runtime", true}; // Share compiled SPU functions between all threads
 		cfg::_enum<spu_block_size_type> spu_block_size{this, "SPU Block Size", spu_block_size_type::safe};
 		cfg::_bool spu_accurate_getllar{this, "Accurate GETLLAR", false};
 		cfg::_bool spu_accurate_putlluc{this, "Accurate PUTLLUC", false};
@@ -360,7 +378,9 @@ struct cfg_root : cfg::node
 		cfg::_bool spu_cache{this, "SPU Cache", true};
 		cfg::_enum<tsx_usage> enable_TSX{this, "Enable TSX", tsx_usage::enabled}; // Enable TSX. Forcing this on Haswell/Broadwell CPUs should be used carefully
 		cfg::_bool spu_accurate_xfloat{this, "Accurate xfloat", false};
+		cfg::_bool spu_approx_xfloat{this, "Approximate xfloat", true};
 
+		cfg::_bool debug_console_mode{this, "Debug Console Mode", false}; // Debug console emulation, not recommended
 		cfg::_enum<lib_loading_type> lib_loading{this, "Lib Loader", lib_loading_type::liblv2only};
 		cfg::_bool hook_functions{this, "Hook static functions"};
 		cfg::set_entry load_libraries{this, "Load libraries"};
@@ -388,6 +408,10 @@ struct cfg_root : cfg::node
 		}
 
 		cfg::_bool host_root{this, "Enable /host_root/"};
+		cfg::_bool init_dirs{this, "Initialize Directories", true};
+
+		cfg::_bool limit_cache_size{this, "Limit disk cache size", false};
+		cfg::_int<0, 10240> cache_max_size{this, "Disk cache maximum size (MB)", 5120};
 
 	} vfs{this};
 
@@ -423,6 +447,7 @@ struct cfg_root : cfg::node
 		cfg::_bool disable_vulkan_mem_allocator{this, "Disable Vulkan Memory Allocator", false};
 		cfg::_bool full_rgb_range_output{this, "Use full RGB output range", true}; // Video out dynamic range
 		cfg::_bool disable_asynchronous_shader_compiler{this, "Disable Asynchronous Shader Compiler", false};
+		cfg::_bool strict_texture_flushing{this, "Strict Texture Flushing", false};
 		cfg::_int<1, 8> consequtive_frames_to_draw{this, "Consecutive Frames To Draw", 1};
 		cfg::_int<1, 8> consequtive_frames_to_skip{this, "Consecutive Frames To Skip", 1};
 		cfg::_int<50, 800> resolution_scale_percent{this, "Resolution Scale", 100};
@@ -500,8 +525,13 @@ struct cfg_root : cfg::node
 		cfg::_bool dump_to_file{this, "Dump to file"};
 		cfg::_bool convert_to_u16{this, "Convert to 16 bit"};
 		cfg::_bool downmix_to_2ch{this, "Downmix to Stereo", true};
-		cfg::_int<2, 128> frames{this, "Buffer Count", 32};
-		cfg::_int<1, 128> startt{this, "Start Threshold", 1};
+		cfg::_int<1, 128> startt{this, "Start Threshold", 1}; // TODO: used only by ALSA, should probably be removed once ALSA is upgraded
+		cfg::_int<0, 200> volume{this, "Master Volume", 100};
+		cfg::_bool enable_buffering{this, "Enable Buffering", true};
+		cfg::_int <20, 250> desired_buffer_duration{this, "Desired Audio Buffer Duration", 100};
+		cfg::_int<1, 1000> sampling_period_multiplier{this, "Sampling Period Multiplier", 100};
+		cfg::_bool enable_time_stretching{this, "Enable Time Stretching", false};
+		cfg::_int<0, 100> time_stretching_threshold{this, "Time Stretching Threshold", 75};
 
 	} audio{this};
 
@@ -523,6 +553,7 @@ struct cfg_root : cfg::node
 		node_sys(cfg::node* _this) : cfg::node(_this, "System") {}
 
 		cfg::_enum<CellSysutilLang> language{this, "Language", (CellSysutilLang)1}; // CELL_SYSUTIL_LANG_ENGLISH_US
+		cfg::_enum<enter_button_assign> enter_button_assignment{this, "Enter button assignment", enter_button_assign::cross};
 
 	} sys{this};
 

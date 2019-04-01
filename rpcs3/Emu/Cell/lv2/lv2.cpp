@@ -1,4 +1,4 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "Emu/System.h"
 
 #include "Emu/Cell/PPUFunction.h"
@@ -176,7 +176,7 @@ const std::array<ppu_function_t, 1024> s_ppu_syscall_table
 	BIND_FUNC(sys_semaphore_get_value),                     //114 (0x072)
 	BIND_FUNC(_sys_lwcond_signal),                          //115 (0x073)
 	BIND_FUNC(_sys_lwcond_signal_all),                      //116 (0x074)
-	null_func,//BIND_FUNC(sys_semaphore_...)                //117 (0x075) // internal, used by sys_lwmutex_unlock
+	BIND_FUNC(_sys_lwmutex_unlock2),                        //117 (0x075)
 	BIND_FUNC(sys_event_flag_clear),                        //118 (0x076)
 	null_func,//BIND_FUNC(sys_time_get_rtc)                 //119 (0x077)  ROOT
 	BIND_FUNC(sys_rwlock_create),                           //120 (0x078)
@@ -257,8 +257,8 @@ const std::array<ppu_function_t, 1024> s_ppu_syscall_table
 	uns_func,                                               //195 (0x0C3)  UNS
 	BIND_FUNC(sys_raw_spu_set_spu_cfg),                     //196 (0x0C4)
 	BIND_FUNC(sys_raw_spu_get_spu_cfg),                     //197 (0x0C5)
-	null_func,//BIND_FUNC(sys_spu_thread_recover_page_fault)//198 (0x0C6)
-	null_func,//BIND_FUNC(sys_raw_spu_recover_page_fault)   //199 (0x0C7)
+	BIND_FUNC(sys_spu_thread_recover_page_fault),           //198 (0x0C6)
+	BIND_FUNC(sys_raw_spu_recover_page_fault),              //199 (0x0C7)
 
 	null_func, null_func, null_func, null_func, null_func,  //204  UNS?
 	null_func, null_func, null_func, null_func, null_func,  //209  UNS?
@@ -1002,13 +1002,13 @@ DECLARE(lv2_obj::g_ppu);
 DECLARE(lv2_obj::g_pending);
 DECLARE(lv2_obj::g_waiting);
 
-void lv2_obj::sleep_timeout(old_thread& thread, u64 timeout)
+void lv2_obj::sleep_timeout(cpu_thread& thread, u64 timeout)
 {
 	std::lock_guard lock(g_mutex);
 
 	const u64 start_time = get_system_time();
 
-	if (auto ppu = dynamic_cast<ppu_thread*>(&thread))
+	if (auto ppu = static_cast<ppu_thread*>(thread.id_type() == 1 ? &thread : nullptr))
 	{
 		LOG_TRACE(PPU, "sleep() - waiting (%zu)", g_pending.size());
 
@@ -1063,7 +1063,15 @@ void lv2_obj::awake(cpu_thread& cpu, u32 prio)
 
 	std::lock_guard lock(g_mutex);
 
-	if (prio == -4)
+	if (prio < INT32_MAX)
+	{
+        // Priority set
+        if (static_cast<ppu_thread&>(cpu).prio.exchange(prio) == prio || !unqueue(g_ppu, &cpu))
+        {
+            return;
+        }
+	}
+	else if (prio == -4)
 	{
 		// Yield command
 		const u64 start_time = get_system_time();
@@ -1085,12 +1093,6 @@ void lv2_obj::awake(cpu_thread& cpu, u32 prio)
 		unqueue(g_pending, &cpu);
 
 		static_cast<ppu_thread&>(cpu).start_time = start_time;
-	}
-
-	if (prio < INT32_MAX && !unqueue(g_ppu, &cpu))
-	{
-		// Priority set
-		return;
 	}
 
 	// Emplace current thread
@@ -1123,7 +1125,7 @@ void lv2_obj::awake(cpu_thread& cpu, u32 prio)
 	}
 
 	// Remove pending if necessary
-	if (!g_pending.empty() && cpu.get() == thread_ctrl::get_current())
+	if (!g_pending.empty() && &cpu == get_current_cpu_thread())
 	{
 		unqueue(g_pending, &cpu);
 	}
@@ -1165,7 +1167,7 @@ void lv2_obj::schedule_all()
 				target->state ^= (cpu_flag::signal + cpu_flag::suspend);
 				target->start_time = 0;
 
-				if (target->get() != thread_ctrl::get_current())
+				if (target != get_current_cpu_thread())
 				{
 					target->notify();
 				}

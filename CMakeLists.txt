@@ -12,6 +12,8 @@ option(USE_ALSA "ALSA audio backend" ON)
 option(USE_PULSE "PulseAudio audio backend" ON)
 option(USE_LIBEVDEV "libevdev-based joystick support" ON)
 
+option(USE_DISCORD_RPC "Discord rich presence integration" ON)
+
 option(USE_SYSTEM_ZLIB "Prefer system ZLIB instead of the builtin one" ON)
 
 option(USE_VULKAN "Vulkan render backend" ON)
@@ -47,6 +49,11 @@ endif()
 if(WIN32)
 	add_definitions(-DUNICODE)
 	add_definitions(-D_WIN32_WINNT=0x0602)
+endif()
+
+if(APPLE)
+	include_directories(/opt/local/include)
+	link_directories(/opt/local/lib)
 endif()
 
 add_subdirectory(Vulkan EXCLUDE_FROM_ALL)

@@ -335,6 +335,9 @@
     <ClCompile Include="Emu\Cell\Modules\cellDmux.cpp">
       <Filter>Emu\Cell\Modules</Filter>
     </ClCompile>
+    <ClCompile Include="Emu\Cell\Modules\cellDtcpIpUtility.cpp">
+      <Filter>Emu\Cell\Modules</Filter>
+    </ClCompile>
     <ClCompile Include="Emu\Cell\Modules\cellFiber.cpp">
       <Filter>Emu\Cell\Modules</Filter>
     </ClCompile>
@@ -410,6 +413,9 @@
     <ClCompile Include="Emu\Cell\Modules\cellMusicExport.cpp">
       <Filter>Emu\Cell\Modules</Filter>
     </ClCompile>
+    <ClCompile Include="Emu\Cell\Modules\cellNetAoi.cpp">
+      <Filter>Emu\Cell\Modules</Filter>
+    </ClCompile>
     <ClCompile Include="Emu\Cell\Modules\cellNetCtl.cpp">
       <Filter>Emu\Cell\Modules</Filter>
     </ClCompile>
@@ -423,6 +429,9 @@
       <Filter>Emu\Cell\Modules</Filter>
     </ClCompile>
     <ClCompile Include="Emu\Cell\Modules\cellPamf.cpp">
+      <Filter>Emu\Cell\Modules</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\Cell\Modules\cellPesmUtility.cpp">
       <Filter>Emu\Cell\Modules</Filter>
     </ClCompile>
     <ClCompile Include="Emu\Cell\Modules\cellPhotoDecode.cpp">
@@ -524,6 +533,9 @@
     <ClCompile Include="Emu\Cell\Modules\cellSysutilAvc2.cpp">
       <Filter>Emu\Cell\Modules</Filter>
     </ClCompile>
+    <ClCompile Include="Emu\Cell\Modules\cellSysutilAvcExt.cpp">
+      <Filter>Emu\Cell\Modules</Filter>
+    </ClCompile>
     <ClCompile Include="Emu\Cell\Modules\cellSysutilMisc.cpp">
       <Filter>Emu\Cell\Modules</Filter>
     </ClCompile>
@@ -548,6 +560,9 @@
     <ClCompile Include="Emu\Cell\Modules\cellVideoOut.cpp">
       <Filter>Emu\Cell\Modules</Filter>
     </ClCompile>
+    <ClCompile Include="Emu\Cell\Modules\cellVideoPlayerUtility.cpp">
+      <Filter>Emu\Cell\Modules</Filter>
+    </ClCompile>
     <ClCompile Include="Emu\Cell\Modules\cellVideoUpload.cpp">
       <Filter>Emu\Cell\Modules</Filter>
     </ClCompile>
@@ -558,6 +573,12 @@
       <Filter>Emu\Cell\Modules</Filter>
     </ClCompile>
     <ClCompile Include="Emu\Cell\Modules\cellWebBrowser.cpp">
+      <Filter>Emu\Cell\Modules</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\Cell\Modules\libad_async.cpp">
+      <Filter>Emu\Cell\Modules</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\Cell\Modules\libad_core.cpp">
       <Filter>Emu\Cell\Modules</Filter>
     </ClCompile>
     <ClCompile Include="Emu\Cell\Modules\libmedi.cpp">
@@ -749,6 +770,15 @@
     <ClCompile Include="Emu\RSX\Overlays\overlay_perf_metrics.cpp">
       <Filter>Emu\GPU\RSX\Overlays</Filter>
     </ClCompile>
+    <ClCompile Include="Emu\RSX\RSXFIFO.cpp">
+      <Filter>Emu\GPU\RSX</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\Cell\Modules\StaticHLE.cpp">
+      <Filter>Emu\Cell\Modules</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\RSX\Overlays\overlay_osk.cpp">
+      <Filter>Emu\GPU\RSX\Overlays</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Crypto\aes.h">
@@ -921,12 +951,6 @@
     </ClInclude>
     <ClInclude Include="..\Utilities\Thread.h">
       <Filter>Utilities</Filter>
-    </ClInclude>
-    <ClInclude Include="Emu\Audio\Null\NullAudioThread.h">
-      <Filter>Emu\Audio\Null</Filter>
-    </ClInclude>
-    <ClInclude Include="Emu\Audio\AudioThread.h">
-      <Filter>Emu\Audio</Filter>
     </ClInclude>
     <ClInclude Include="..\Utilities\File.h">
       <Filter>Utilities</Filter>
@@ -1449,6 +1473,21 @@
     </ClInclude>
     <ClInclude Include="Emu\RSX\Common\texture_cache_utils.h">
       <Filter>Emu\GPU\RSX\Common</Filter>
+    </ClInclude>
+    <ClInclude Include="Emu\RSX\RSXFIFO.h">
+      <Filter>Emu\GPU\RSX</Filter>
+    </ClInclude>
+    <ClInclude Include="Emu\RSX\Common\texture_cache_predictor.h">
+      <Filter>Emu\GPU\RSX\Common</Filter>
+    </ClInclude>
+    <ClInclude Include="Emu\Cell\Modules\StaticHLE.h">
+      <Filter>Emu\Cell\Modules</Filter>
+    </ClInclude>
+    <ClInclude Include="Emu\Audio\AudioBackend.h">
+      <Filter>Emu\Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="Emu\Audio\Null\NullAudioBackend.h">
+      <Filter>Emu\Audio\Null</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>

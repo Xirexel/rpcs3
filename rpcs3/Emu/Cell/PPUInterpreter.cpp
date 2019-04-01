@@ -1027,7 +1027,9 @@ bool ppu_interpreter_precise::VMHRADDSHS(ppu_thread& ppu, ppu_opcode_t op)
 
 bool ppu_interpreter::VMINFP(ppu_thread& ppu, ppu_opcode_t op)
 {
-	ppu.vr[op.vd].vf = _mm_min_ps(ppu.vr[op.va].vf, ppu.vr[op.vb].vf);
+	const auto a = ppu.vr[op.va].vf;
+	const auto b = ppu.vr[op.vb].vf;
+	ppu.vr[op.vd].vf = _mm_or_ps(_mm_min_ps(a, b),  _mm_min_ps(b, a));
 	return true;
 }
 
@@ -1909,6 +1911,7 @@ bool ppu_interpreter::VSL(ppu_thread& ppu, ppu_opcode_t op)
 	d._u8[0] = VA._u8[0] << sh;
 	for (uint b = 1; b < 16; b++)
 	{
+		sh = ppu.vr[op.vb]._u8[b] & 0x7;
 		d._u8[b] = (VA._u8[b] << sh) | (VA._u8[b - 1] >> (8 - sh));
 	}
 	return true;
@@ -2062,11 +2065,12 @@ bool ppu_interpreter::VSR(ppu_thread& ppu, ppu_opcode_t op)
 {
 	auto& d = ppu.vr[op.vd];
 	v128 VA = ppu.vr[op.va];
-	u8 sh = ppu.vr[op.vb]._u8[0] & 0x7;
+	u8 sh = ppu.vr[op.vb]._u8[15] & 0x7;
 
 	d._u8[15] = VA._u8[15] >> sh;
 	for (uint b = 14; ~b; b--)
 	{
+		sh = ppu.vr[op.vb]._u8[b] & 0x7;
 		d._u8[b] = (VA._u8[b] >> sh) | (VA._u8[b + 1] << (8 - sh));
 	}
 	return true;
@@ -2899,15 +2903,14 @@ bool ppu_interpreter::BC(ppu_thread& ppu, ppu_opcode_t op)
 	const bool bo3 = (op.bo & 0x02) != 0;
 
 	ppu.ctr -= (bo2 ^ true);
+	if (op.lk) ppu.lr = ppu.cia + 4;
 
 	const bool ctr_ok = bo2 | ((ppu.ctr != 0) ^ bo3);
 	const bool cond_ok = bo0 | (ppu.cr[op.bi] ^ (bo1 ^ true));
 
 	if (ctr_ok && cond_ok)
 	{
-		const u32 link = ppu.cia + 4;
 		ppu.cia = (op.aa ? 0 : ppu.cia) + op.bt14;
-		if (op.lk) ppu.lr = link;
 		return false;
 	}
 	else
@@ -2954,11 +2957,12 @@ bool ppu_interpreter::BCLR(ppu_thread& ppu, ppu_opcode_t op)
 	const bool ctr_ok = bo2 | ((ppu.ctr != 0) ^ bo3);
 	const bool cond_ok = bo0 | (ppu.cr[op.bi] ^ (bo1 ^ true));
 
+	const u32 target = (u32)ppu.lr & ~3;
+	if (op.lk) ppu.lr = ppu.cia + 4;
+
 	if (ctr_ok && cond_ok)
 	{
-		const u32 link = ppu.cia + 4;
-		ppu.cia = (u32)ppu.lr & ~3;
-		if (op.lk) ppu.lr = link;
+		ppu.cia = target;
 		return false;
 	}
 	else
@@ -3023,11 +3027,11 @@ bool ppu_interpreter::CROR(ppu_thread& ppu, ppu_opcode_t op)
 
 bool ppu_interpreter::BCCTR(ppu_thread& ppu, ppu_opcode_t op)
 {
+	if (op.lk) ppu.lr = ppu.cia + 4;
+
 	if (op.bo & 0x10 || ppu.cr[op.bi] == ((op.bo & 0x8) != 0))
 	{
-		const u32 link = ppu.cia + 4;
 		ppu.cia = (u32)ppu.ctr & ~3;
-		if (op.lk) ppu.lr = link;
 		return false;
 	}
 
@@ -4662,7 +4666,7 @@ bool ppu_interpreter::FNMSUBS(ppu_thread& ppu, ppu_opcode_t op)
 
 bool ppu_interpreter::FNMADDS(ppu_thread& ppu, ppu_opcode_t op)
 {
-	ppu.fpr[op.frd] = f32(-(ppu.fpr[op.fra] * ppu.fpr[op.frc]) - ppu.fpr[op.frb]);
+	ppu.fpr[op.frd] = f32(-(ppu.fpr[op.fra] * ppu.fpr[op.frc] + ppu.fpr[op.frb]));
 	if (UNLIKELY(op.rc)) fmt::throw_exception("%s: op.rc", __func__); //ppu_cr_set(ppu, 1, ppu.fpscr.fg, ppu.fpscr.fl, ppu.fpscr.fe, ppu.fpscr.fu);
 	return true;
 }
@@ -4815,7 +4819,7 @@ bool ppu_interpreter::FNMSUB(ppu_thread& ppu, ppu_opcode_t op)
 
 bool ppu_interpreter::FNMADD(ppu_thread& ppu, ppu_opcode_t op)
 {
-	ppu.fpr[op.frd] = -(ppu.fpr[op.fra] * ppu.fpr[op.frc]) - ppu.fpr[op.frb];
+	ppu.fpr[op.frd] = -(ppu.fpr[op.fra] * ppu.fpr[op.frc] + ppu.fpr[op.frb]);
 	if (UNLIKELY(op.rc)) fmt::throw_exception("%s: op.rc", __func__); //ppu_cr_set(ppu, 1, ppu.fpscr.fg, ppu.fpscr.fl, ppu.fpscr.fe, ppu.fpscr.fu);
 	return true;
 }

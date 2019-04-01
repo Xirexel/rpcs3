@@ -1,8 +1,9 @@
-#pragma once
+﻿#pragma once
 
 #include "GCM.h"
 #include "Utilities/types.h"
 #include "Utilities/BEType.h"
+#include "rsx_utils.h"
 
 namespace rsx
 {
@@ -60,14 +61,17 @@ struct push_buffer_vertex_info
 
 	u32 vertex_count = 0;
 	u32 attribute_mask = ~0;
-	std::vector<u32> data;
+	rsx::simple_array<u32> data;
 
 	void clear()
 	{
-		data.resize(0);
-		attribute_mask = ~0;
-		vertex_count = 0;
-		size = 0;
+		if (size)
+		{
+			data.clear();
+			attribute_mask = ~0;
+			vertex_count = 0;
+			size = 0;
+		}
 	}
 
 	u8 get_vertex_size_in_dwords(vertex_base_type type)
@@ -95,6 +99,8 @@ struct push_buffer_vertex_info
 		const u32 element_mask = (1 << sub_index);
 		const u8  vertex_size = get_vertex_size_in_dwords(type);
 
+		this->type = type;
+
 		if (attribute_mask & element_mask)
 		{
 			attribute_mask = 0;
@@ -119,7 +125,6 @@ struct register_vertex_data_info
 
 	register_vertex_data_info() {}
 	std::array<u32, 4> data;
-
 };
 
 }

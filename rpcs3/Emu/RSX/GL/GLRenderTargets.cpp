@@ -173,15 +173,11 @@ namespace
 
 void GLGSRender::init_buffers(rsx::framebuffer_creation_context context, bool skip_reading)
 {
-	if (m_framebuffer_state_contested && (m_framebuffer_contest_type != context))
+	if (m_current_framebuffer_context == context && !m_rtts_dirty && m_draw_fbo)
 	{
-		// Clear commands affect contested memory
-		m_rtts_dirty = true;
-	}
-
-	if (m_draw_fbo && !m_rtts_dirty)
-	{
-		set_viewport();
+		// Fast path
+		// Framebuffer usage has not changed, framebuffer exists and config regs have not changed
+		set_scissor();
 		return;
 	}
 
@@ -212,11 +208,19 @@ void GLGSRender::init_buffers(rsx::framebuffer_creation_context context, bool sk
 			ds->write_aa_mode = layout.aa_mode;
 		}
 
+		m_draw_fbo->bind();
+		set_viewport();
+		set_scissor();
+
 		return;
 	}
 
-	m_rtts.prepare_render_target(nullptr, layout.color_format, layout.depth_format, layout.width, layout.height,
-		layout.target, layout.color_addresses, layout.zeta_address);
+	m_rtts.prepare_render_target(nullptr,
+		layout.color_format, layout.depth_format,
+		layout.width, layout.height,
+		layout.target, layout.aa_mode,
+		layout.color_addresses, layout.zeta_address,
+		layout.actual_color_pitch, layout.actual_zeta_pitch);
 
 	bool old_format_found = false;
 	gl::texture::format old_format;
@@ -226,6 +230,11 @@ void GLGSRender::init_buffers(rsx::framebuffer_creation_context context, bool sk
 
 	const auto color_offsets = get_offsets();
 	const auto color_locations = get_locations();
+
+	const u8 color_bpp = get_format_block_size_in_bytes(layout.color_format);
+	const u8 depth_bpp = (layout.depth_format == rsx::surface_depth_format::z16 ? 2 : 4);
+
+	gl::command_context cmd{ gl_state };
 
 	for (int i = 0; i < rsx::limits::color_buffers_count; ++i)
 	{
@@ -239,7 +248,7 @@ void GLGSRender::init_buffers(rsx::framebuffer_creation_context context, bool sk
 
 			const utils::address_range surface_range = m_surface_info[i].get_memory_range();
 			m_gl_texture_cache.set_memory_read_flags(surface_range, rsx::memory_read_flags::flush_once);
-			m_gl_texture_cache.flush_if_cache_miss_likely(old_format, surface_range);
+			m_gl_texture_cache.flush_if_cache_miss_likely(cmd, surface_range);
 		}
 
 		if (std::get<0>(m_rtts.m_bound_render_targets[i]))
@@ -247,13 +256,12 @@ void GLGSRender::init_buffers(rsx::framebuffer_creation_context context, bool sk
 			auto rtt = std::get<1>(m_rtts.m_bound_render_targets[i]);
 			color_targets[i] = rtt->id();
 
-			rtt->set_rsx_pitch(layout.color_pitch[i]);
-			m_surface_info[i] = { layout.color_addresses[i], layout.actual_color_pitch[i], false, layout.color_format, layout.depth_format, layout.width, layout.height };
+			verify("Pitch mismatch!" HERE), rtt->get_rsx_pitch() == layout.actual_color_pitch[i];
+			m_surface_info[i] = { layout.color_addresses[i], layout.actual_color_pitch[i], false, layout.color_format, layout.depth_format, layout.width, layout.height, color_bpp };
 
 			rtt->tile = find_tile(color_offsets[i], color_locations[i]);
 			rtt->write_aa_mode = layout.aa_mode;
 			m_gl_texture_cache.notify_surface_changed(m_surface_info[i].address);
-			m_gl_texture_cache.tag_framebuffer(m_surface_info[i].address);
 		}
 		else
 		{
@@ -271,18 +279,17 @@ void GLGSRender::init_buffers(rsx::framebuffer_creation_context context, bool sk
 
 			const utils::address_range surface_range = m_depth_surface_info.get_memory_range();
 			m_gl_texture_cache.set_memory_read_flags(surface_range, rsx::memory_read_flags::flush_once);
-			m_gl_texture_cache.flush_if_cache_miss_likely(old_format, surface_range);
+			m_gl_texture_cache.flush_if_cache_miss_likely(cmd, surface_range);
 		}
 
 		auto ds = std::get<1>(m_rtts.m_bound_depth_stencil);
 		depth_stencil_target = ds->id();
 
-		std::get<1>(m_rtts.m_bound_depth_stencil)->set_rsx_pitch(rsx::method_registers.surface_z_pitch());
-		m_depth_surface_info = { layout.zeta_address, layout.actual_zeta_pitch, true, layout.color_format, layout.depth_format, layout.width, layout.height };
+		verify("Pitch mismatch!" HERE), std::get<1>(m_rtts.m_bound_depth_stencil)->get_rsx_pitch() == layout.actual_zeta_pitch;
+		m_depth_surface_info = { layout.zeta_address, layout.actual_zeta_pitch, true, layout.color_format, layout.depth_format, layout.width, layout.height, depth_bpp };
 
 		ds->write_aa_mode = layout.aa_mode;
 		m_gl_texture_cache.notify_surface_changed(layout.zeta_address);
-		m_gl_texture_cache.tag_framebuffer(layout.zeta_address);
 	}
 	else
 	{
@@ -371,32 +378,40 @@ void GLGSRender::init_buffers(rsx::framebuffer_creation_context context, bool sk
 
 	check_zcull_status(true);
 	set_viewport();
+	set_scissor();
 
 	m_gl_texture_cache.clear_ro_tex_invalidate_intr();
 
-	//Mark buffer regions as NO_ACCESS on Cell visible side
-	if (g_cfg.video.write_color_buffers)
+	const auto color_format = rsx::internals::surface_color_format_to_gl(layout.color_format);
+	for (u8 i = 0; i < rsx::limits::color_buffers_count; ++i)
 	{
-		auto color_format = rsx::internals::surface_color_format_to_gl(layout.color_format);
+		if (!m_surface_info[i].address || !m_surface_info[i].pitch) continue;
 
-		for (u8 i = 0; i < rsx::limits::color_buffers_count; ++i)
+		const auto surface_range = m_surface_info[i].get_memory_range(layout.aa_factors);
+		if (g_cfg.video.write_color_buffers)
 		{
-			if (!m_surface_info[i].address || !m_surface_info[i].pitch) continue;
-
-			const utils::address_range surface_range = m_surface_info[i].get_memory_range(layout.aa_factors[1]);
-			m_gl_texture_cache.lock_memory_region(std::get<1>(m_rtts.m_bound_render_targets[i]), surface_range, m_surface_info[i].width, m_surface_info[i].height, m_surface_info[i].pitch,
-			color_format.format, color_format.type, color_format.swap_bytes);
+			// Mark buffer regions as NO_ACCESS on Cell-visible side
+			m_gl_texture_cache.lock_memory_region(cmd, std::get<1>(m_rtts.m_bound_render_targets[i]), surface_range, m_surface_info[i].width, m_surface_info[i].height, m_surface_info[i].pitch,
+				color_format.format, color_format.type, color_format.swap_bytes);
+		}
+		else
+		{
+			m_gl_texture_cache.commit_framebuffer_memory_region(cmd, surface_range);
 		}
 	}
 
-	if (g_cfg.video.write_depth_buffer)
+	if (m_depth_surface_info.address && m_depth_surface_info.pitch)
 	{
-		if (m_depth_surface_info.address && m_depth_surface_info.pitch)
+		const auto surface_range = m_depth_surface_info.get_memory_range(layout.aa_factors);
+		if (g_cfg.video.write_depth_buffer)
 		{
 			const auto depth_format_gl = rsx::internals::surface_depth_format_to_gl(layout.depth_format);
-			const utils::address_range surface_range = m_depth_surface_info.get_memory_range(layout.aa_factors[1]);
-			m_gl_texture_cache.lock_memory_region(std::get<1>(m_rtts.m_bound_depth_stencil), surface_range, m_depth_surface_info.width, m_depth_surface_info.height, m_depth_surface_info.pitch,
+			m_gl_texture_cache.lock_memory_region(cmd, std::get<1>(m_rtts.m_bound_depth_stencil), surface_range, m_depth_surface_info.width, m_depth_surface_info.height, m_depth_surface_info.pitch,
 				depth_format_gl.format, depth_format_gl.type, true);
+		}
+		else
+		{
+			m_gl_texture_cache.commit_framebuffer_memory_region(cmd, surface_range);
 		}
 	}
 
@@ -465,8 +480,6 @@ void GLGSRender::read_buffers()
 					}
 					else
 					{
-						m_gl_texture_cache.invalidate_range(range, rsx::invalidation_cause::read);
-
 						std::unique_ptr<u8[]> buffer(new u8[pitch * height]);
 						color_buffer.read(buffer.get(), width, height, pitch);
 
@@ -553,4 +566,85 @@ void GLGSRender::read_buffers()
 
 		std::get<1>(m_rtts.m_bound_depth_stencil)->copy_from(pbo_depth, depth_format.format, depth_format.type);
 	}
+}
+
+void gl::render_target::memory_barrier(gl::command_context& cmd, bool force_init)
+{
+	auto is_depth = [](gl::texture::internal_format format)
+	{
+		// TODO: Change this to image aspect semantics
+		switch (format)
+		{
+		case gl::texture::internal_format::depth16:
+		case gl::texture::internal_format::depth24_stencil8:
+		case gl::texture::internal_format::depth32f_stencil8:
+			return true;
+		default:
+			return false;
+		}
+	};
+
+	if (!old_contents)
+	{
+		// No memory to inherit
+		if (dirty && force_init)
+		{
+			// Initialize memory contents if we did not find anything usable
+			// TODO: Properly sync with Cell
+			if (is_depth(get_internal_format()))
+			{
+				gl::g_hw_blitter->fast_clear_image(cmd, this, 1.f, 255);
+			}
+			else
+			{
+				gl::g_hw_blitter->fast_clear_image(cmd, this, {});
+			}
+
+			on_write();
+		}
+
+		return;
+	}
+
+	auto src_texture = static_cast<gl::render_target*>(old_contents);
+	if (!rsx::pitch_compatible(this, src_texture))
+	{
+		LOG_TRACE(RSX, "Pitch mismatch, could not transfer inherited memory");
+		return;
+	}
+
+	const auto src_bpp = src_texture->get_bpp();
+	const auto dst_bpp = get_bpp();
+	rsx::typeless_xfer typeless_info{};
+
+	const bool dst_is_depth = is_depth(get_internal_format());
+	const auto region = rsx::get_transferable_region(this);
+
+	if (get_internal_format() == src_texture->get_internal_format())
+	{
+		// Copy data from old contents onto this one
+		verify(HERE), src_bpp == dst_bpp;
+	}
+	else
+	{
+		// Mem cast, generate typeless xfer info
+		const bool src_is_depth = is_depth(src_texture->get_internal_format());
+		if (src_bpp != dst_bpp || dst_is_depth || src_is_depth)
+		{
+			typeless_info.src_is_typeless = true;
+			typeless_info.src_context = rsx::texture_upload_context::framebuffer_storage;
+			typeless_info.src_native_format_override = (u32)get_internal_format();
+			typeless_info.src_is_depth = src_is_depth;
+			typeless_info.src_scaling_hint = f32(src_bpp) / dst_bpp;
+		}
+	}
+
+	gl::g_hw_blitter->scale_image(cmd, old_contents, this,
+		{ 0, 0, std::get<0>(region), std::get<1>(region) },
+		{ 0, 0, std::get<2>(region) , std::get<3>(region) },
+		!dst_is_depth, dst_is_depth, typeless_info);
+
+	// Memory has been transferred, discard old contents and update memory flags
+	// TODO: Preserve memory outside surface clip region
+	on_write();
 }

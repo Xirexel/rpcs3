@@ -1,4 +1,4 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "Emu/Memory/vm.h"
 #include "Emu/System.h"
 #include "VKFragmentProgram.h"
@@ -105,7 +105,7 @@ void VKFragmentDecompilerThread::insertOutputs(std::stringstream & OS)
 
 void VKFragmentDecompilerThread::insertConstants(std::stringstream & OS)
 {
-	int location = TEXTURES_FIRST_BIND_SLOT;
+	u32 location = TEXTURES_FIRST_BIND_SLOT;
 	for (const ParamType& PT : m_parr.params[PF_PARAM_UNIFORM])
 	{
 		if (PT.type != "sampler1D" &&
@@ -141,12 +141,25 @@ void VKFragmentDecompilerThread::insertConstants(std::stringstream & OS)
 			inputs.push_back(in);
 
 			OS << "layout(set=0, binding=" << location++ << ") uniform " << samplerType << " " << PI.name << ";\n";
+
+			if (m_prog.redirected_textures & mask)
+			{
+				// Insert stencil mirror declaration
+				in.name += "_stencil";
+				in.location = location;
+
+				inputs.push_back(in);
+
+				OS << "layout(set=0, binding=" << location++ << ") uniform u" << PT.type << " " << in.name << ";\n";
+			}
 		}
 	}
 
-	OS << "layout(std140, set = 0, binding = 2) uniform FragmentConstantsBuffer\n";
-	OS << "{\n";
+	// Some drivers (macOS) do not support more than 16 texture descriptors per stage
+	// TODO: If any application requires more than this, the layout can be restructured a bit
+	verify("Too many sampler descriptors!" HERE), location <= VERTEX_TEXTURES_FIRST_BIND_SLOT;
 
+	std::string constants_block;
 	for (const ParamType& PT : m_parr.params[PF_PARAM_UNIFORM])
 	{
 		if (PT.type == "sampler1D" ||
@@ -156,9 +169,21 @@ void VKFragmentDecompilerThread::insertConstants(std::stringstream & OS)
 			continue;
 
 		for (const ParamItem& PI : PT.items)
-			OS << "	" << PT.type << " " << PI.name << ";\n";
+		{
+			constants_block += "	" + PT.type + " " + PI.name + ";\n";
+		}
 	}
 
+	if (!constants_block.empty())
+	{
+		OS << "layout(std140, set = 0, binding = 3) uniform FragmentConstantsBuffer\n";
+		OS << "{\n";
+		OS << constants_block;
+		OS << "};\n\n";
+	}
+
+	OS << "layout(std140, set = 0, binding = 4) uniform FragmentStateBuffer\n";
+	OS << "{\n";
 	OS << "	float fog_param0;\n";
 	OS << "	float fog_param1;\n";
 	OS << "	uint rop_control;\n";
@@ -167,15 +192,26 @@ void VKFragmentDecompilerThread::insertConstants(std::stringstream & OS)
 	OS << "	uint fog_mode;\n";
 	OS << "	float wpos_scale;\n";
 	OS << "	float wpos_bias;\n";
+	OS << "};\n\n";
+
+	OS << "layout(std140, set = 0, binding = 5) uniform TextureParametersBuffer\n";
+	OS << "{\n";
 	OS << "	vec4 texture_parameters[16];\n";
-	OS << "};\n";
+	OS << "};\n\n";
 
 	vk::glsl::program_input in;
 	in.location = FRAGMENT_CONSTANT_BUFFERS_BIND_SLOT;
 	in.domain = glsl::glsl_fragment_program;
 	in.name = "FragmentConstantsBuffer";
 	in.type = vk::glsl::input_type_uniform_buffer;
+	inputs.push_back(in);
 
+	in.location = FRAGMENT_STATE_BIND_SLOT;
+	in.name = "FragmentStateBuffer";
+	inputs.push_back(in);
+
+	in.location = FRAGMENT_TEXTURE_PARAMS_BIND_SLOT;
+	in.name = "TextureParametersBuffer";
 	inputs.push_back(in);
 }
 
@@ -367,7 +403,7 @@ void VKFragmentProgram::Decompile(const RSXFragmentProgram& prog)
 	decompiler.Task();
 
 	shader.create(::glsl::program_domain::glsl_fragment_program, source);
-	
+
 	for (const ParamType& PT : decompiler.m_parr.params[PF_PARAM_UNIFORM])
 	{
 		for (const ParamItem& PI : PT.items)
@@ -386,7 +422,7 @@ void VKFragmentProgram::Decompile(const RSXFragmentProgram& prog)
 
 void VKFragmentProgram::Compile()
 {
-	fs::file(fs::get_config_dir() + "shaderlog/FragmentProgram" + std::to_string(id) + ".spirv", fs::rewrite).write(shader.get_source());
+	fs::file(fs::get_cache_dir() + "shaderlog/FragmentProgram" + std::to_string(id) + ".spirv", fs::rewrite).write(shader.get_source());
 	handle = shader.compile();
 }
 

@@ -1,4 +1,4 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "GLTexture.h"
 #include "../GCM.h"
 #include "../RSXThread.h"
@@ -100,9 +100,9 @@ namespace gl
 		case texture::internal_format::compressed_rgba_s3tc_dxt5:
 			return std::make_tuple(GL_RGBA, GL_UNSIGNED_BYTE, false);
 		case texture::internal_format::r8:
-			return std::make_tuple(GL_R, GL_UNSIGNED_BYTE, false);
+			return std::make_tuple(GL_RED, GL_UNSIGNED_BYTE, false);
 		case texture::internal_format::r32f:
-			return std::make_tuple(GL_R, GL_FLOAT, true);
+			return std::make_tuple(GL_RED, GL_FLOAT, true);
 		case texture::internal_format::r5g6b5:
 			return std::make_tuple(GL_RGB, GL_UNSIGNED_SHORT_5_6_5, true);
 		case texture::internal_format::rg8:
@@ -214,7 +214,7 @@ namespace gl
 		glSamplerParameterfv(samplerHandle, GL_TEXTURE_BORDER_COLOR, border_color.rgba);
 
 		if (sampled_image->upload_context != rsx::texture_upload_context::shader_read ||
-			tex.get_exact_mipmap_count() <= 1)
+			tex.get_exact_mipmap_count() == 1)
 		{
 			GLint min_filter = tex_min_filter(tex.min_filter());
 
@@ -287,6 +287,19 @@ namespace gl
 		glSamplerParameterf(samplerHandle, GL_TEXTURE_LOD_BIAS, tex.bias());
 		glSamplerParameteri(samplerHandle, GL_TEXTURE_MIN_LOD, (tex.min_lod() >> 8));
 		glSamplerParameteri(samplerHandle, GL_TEXTURE_MAX_LOD, (tex.max_lod() >> 8));
+		glSamplerParameteri(samplerHandle, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+	}
+
+	void sampler_state::apply_defaults(GLenum default_filter)
+	{
+		glSamplerParameteri(samplerHandle, GL_TEXTURE_WRAP_S, GL_REPEAT);
+		glSamplerParameteri(samplerHandle, GL_TEXTURE_WRAP_T, GL_REPEAT);
+		glSamplerParameteri(samplerHandle, GL_TEXTURE_WRAP_R, GL_REPEAT);
+		glSamplerParameteri(samplerHandle, GL_TEXTURE_MIN_FILTER, default_filter);
+		glSamplerParameteri(samplerHandle, GL_TEXTURE_MAG_FILTER, default_filter);
+		glSamplerParameterf(samplerHandle, GL_TEXTURE_LOD_BIAS, 0.f);
+		glSamplerParameteri(samplerHandle, GL_TEXTURE_MIN_LOD, 0);
+		glSamplerParameteri(samplerHandle, GL_TEXTURE_MAX_LOD, 0);
 		glSamplerParameteri(samplerHandle, GL_TEXTURE_COMPARE_MODE, GL_NONE);
 	}
 
@@ -560,12 +573,10 @@ namespace gl
 		return remap_values;
 	}
 
-	void upload_texture(GLuint id, u32 texaddr, u32 gcm_format, u16 width, u16 height, u16 depth, u16 mipmaps, bool is_swizzled, rsx::texture_dimension_extended type,
+	void upload_texture(GLuint id, u32 gcm_format, u16 width, u16 height, u16 depth, u16 mipmaps, bool is_swizzled, rsx::texture_dimension_extended type,
 			const std::vector<rsx_subresource_layout>& subresources_layout)
 	{
-		const bool is_cubemap = type == rsx::texture_dimension_extended::texture_dimension_cubemap;
-		
-		size_t texture_data_sz = get_placed_texture_storage_size(width, height, depth, gcm_format, mipmaps, is_cubemap, 256, 512);
+		size_t texture_data_sz = get_placed_texture_storage_size(width, height, depth, gcm_format, mipmaps, type == rsx::texture_dimension_extended::texture_dimension_cubemap, 256, 512);
 		std::vector<gsl::byte> data_upload_buf(texture_data_sz);
 
 		GLenum target;

@@ -1,4 +1,4 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "VKHelpers.h"
 #include "VKCompute.h"
 #include "Utilities/mutex.h"
@@ -14,11 +14,14 @@ namespace vk
 	std::unordered_map<u32, std::unique_ptr<image>> g_typeless_textures;
 	std::unordered_map<u32, std::unique_ptr<vk::compute_task>> g_compute_tasks;
 
+	// Garbage collection
+	std::vector<std::unique_ptr<image>> g_deleted_typeless_textures;
+
 	VkSampler g_null_sampler = nullptr;
 
 	atomic_t<bool> g_cb_no_interrupt_flag { false };
 
-	//Driver compatibility workarounds
+	// Driver compatibility workarounds
 	VkFlags g_heap_compatible_buffer_types = 0;
 	driver_vendor g_driver_vendor = driver_vendor::unknown;
 	bool g_drv_no_primitive_restart_flag = false;
@@ -28,7 +31,7 @@ namespace vk
 	u64 g_num_processed_frames = 0;
 	u64 g_num_total_frames = 0;
 
-	//global submit guard to prevent race condition on queue submit
+	// global submit guard to prevent race condition on queue submit
 	shared_mutex g_submit_mutex;
 
 	VKAPI_ATTR void* VKAPI_CALL mem_realloc(void* pUserData, void* pOriginal, size_t size, size_t alignment, VkSystemAllocationScope allocationScope)
@@ -172,20 +175,28 @@ namespace vk
 		return g_null_image_view->value;
 	}
 
-	vk::image* get_typeless_helper(VkFormat format)
+	vk::image* get_typeless_helper(VkFormat format, u32 requested_width, u32 requested_height)
 	{
 		auto create_texture = [&]()
 		{
+			u32 new_width = align(requested_width, 1024u);
+			u32 new_height = align(requested_height, 1024u);
+
 			return new vk::image(*g_current_renderer, g_current_renderer->get_memory_mapping().device_local, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-				VK_IMAGE_TYPE_2D, format, 4096, 4096, 1, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+				VK_IMAGE_TYPE_2D, format, new_width, new_height, 1, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
 				VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0);
 		};
 
 		auto &ptr = g_typeless_textures[(u32)format];
-		if (!ptr)
+		if (!ptr || ptr->width() < requested_width || ptr->height() < requested_height)
 		{
-			auto _img = create_texture();
-			ptr.reset(_img);
+			if (ptr)
+			{
+				// Safely move to deleted pile
+				g_deleted_typeless_textures.emplace_back(std::move(ptr));
+			}
+
+			ptr.reset(create_texture());
 		}
 
 		return ptr.get();
@@ -229,6 +240,7 @@ namespace vk
 		g_scratch_buffer.reset();
 
 		g_typeless_textures.clear();
+		g_deleted_typeless_textures.clear();
 
 		if (g_null_sampler)
 			vkDestroySampler(*g_current_renderer, g_null_sampler, nullptr);
@@ -397,7 +409,7 @@ namespace vk
 		vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, nullptr, 1, &barrier, 0, nullptr);
 	}
 
-	void change_image_layout(VkCommandBuffer cmd, VkImage image, VkImageLayout current_layout, VkImageLayout new_layout, VkImageSubresourceRange range)
+	void change_image_layout(VkCommandBuffer cmd, VkImage image, VkImageLayout current_layout, VkImageLayout new_layout, const VkImageSubresourceRange& range)
 	{
 		//Prepare an image to match the new layout..
 		VkImageMemoryBarrier barrier = {};
@@ -416,6 +428,25 @@ namespace vk
 
 		switch (new_layout)
 		{
+		case VK_IMAGE_LAYOUT_GENERAL:
+			// Avoid this layout as it is unoptimized
+			barrier.dstAccessMask =
+			{
+				VK_ACCESS_TRANSFER_READ_BIT |
+				VK_ACCESS_TRANSFER_WRITE_BIT |
+				VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+				VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+				VK_ACCESS_SHADER_READ_BIT |
+				VK_ACCESS_INPUT_ATTACHMENT_READ_BIT
+			};
+			dst_stage =
+			{
+				VK_PIPELINE_STAGE_TRANSFER_BIT |
+				VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+				VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+				VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+			};
+			break;
 		case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
 			barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 			dst_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -437,10 +468,32 @@ namespace vk
 			barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
 			dst_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
 			break;
+		case VK_IMAGE_LAYOUT_UNDEFINED:
+		case VK_IMAGE_LAYOUT_PREINITIALIZED:
+			fmt::throw_exception("Attempted to transition to an invalid layout");
 		}
 
 		switch (current_layout)
 		{
+		case VK_IMAGE_LAYOUT_GENERAL:
+			// Avoid this layout as it is unoptimized
+			barrier.srcAccessMask =
+			{
+				VK_ACCESS_TRANSFER_READ_BIT |
+				VK_ACCESS_TRANSFER_WRITE_BIT |
+				VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+				VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+				VK_ACCESS_SHADER_READ_BIT |
+				VK_ACCESS_INPUT_ATTACHMENT_READ_BIT
+			};
+			src_stage =
+			{
+				VK_PIPELINE_STAGE_TRANSFER_BIT |
+				VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+				VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+				VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+			};
+			break;
 		case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
 			barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 			src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -467,7 +520,7 @@ namespace vk
 		vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 	}
 
-	void change_image_layout(VkCommandBuffer cmd, vk::image *image, VkImageLayout new_layout, VkImageSubresourceRange range)
+	void change_image_layout(VkCommandBuffer cmd, vk::image *image, VkImageLayout new_layout, const VkImageSubresourceRange& range)
 	{
 		if (image->current_layout == new_layout) return;
 
@@ -577,18 +630,63 @@ namespace vk
 		}
 	}
 
-	void wait_for_fence(VkFence fence)
+	VkResult wait_for_fence(VkFence fence, u64 timeout)
 	{
-		while (auto status = vkGetFenceStatus(*g_current_renderer, fence))
+		if (timeout)
 		{
-			switch (status)
+			return vkWaitForFences(*g_current_renderer, 1, &fence, VK_FALSE, timeout * 1000ull);
+		}
+		else
+		{
+			while (auto status = vkGetFenceStatus(*g_current_renderer, fence))
 			{
-			case VK_NOT_READY:
-				continue;
+				switch (status)
+				{
+				case VK_NOT_READY:
+					continue;
+				default:
+					die_with_error(HERE, status);
+					return status;
+				}
+			}
+
+			return VK_SUCCESS;
+		}
+	}
+
+	VkResult wait_for_event(VkEvent event, u64 timeout)
+	{
+		u64 t = 0;
+		while (true)
+		{
+			switch (const auto status = vkGetEventStatus(*g_current_renderer, event))
+			{
+			case VK_EVENT_SET:
+				return VK_SUCCESS;
+			case VK_EVENT_RESET:
+				break;
 			default:
 				die_with_error(HERE, status);
-				return;
+				return status;
 			}
+
+			if (timeout)
+			{
+				if (!t)
+				{
+					t = get_system_time();
+					continue;
+				}
+
+				if ((get_system_time() - t) > timeout)
+				{
+					LOG_ERROR(RSX, "[vulkan] vk::wait_for_event has timed out!");
+					return VK_TIMEOUT;
+				}
+			}
+
+			//std::this_thread::yield();
+			_mm_pause();
 		}
 	}
 

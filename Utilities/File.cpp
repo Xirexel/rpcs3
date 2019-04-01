@@ -135,10 +135,10 @@ static fs::error to_error(DWORD e)
 #if defined(__APPLE__)
 #include <copyfile.h>
 #include <mach-o/dyld.h>
-#elif defined(__DragonFly__) || defined(__FreeBSD__)
-#include <sys/socket.h> // sendfile
 #elif defined(__linux__) || defined(__sun)
 #include <sys/sendfile.h>
+#else
+#include <fstream>
 #endif
 
 static fs::error to_error(int e)
@@ -284,7 +284,7 @@ bool fs::stat(const std::string& path, stat_t& info)
 	info.size = (u64)attrs.nFileSizeLow | ((u64)attrs.nFileSizeHigh << 32);
 	info.atime = to_time(attrs.ftLastAccessTime);
 	info.mtime = to_time(attrs.ftLastWriteTime);
-	info.ctime = to_time(attrs.ftCreationTime);
+	info.ctime = info.mtime;
 #else
 	struct ::stat file_info;
 	if (::stat(path.c_str(), &file_info) != 0)
@@ -298,8 +298,11 @@ bool fs::stat(const std::string& path, stat_t& info)
 	info.size = file_info.st_size;
 	info.atime = file_info.st_atime;
 	info.mtime = file_info.st_mtime;
-	info.ctime = file_info.st_ctime;
+	info.ctime = info.mtime;
 #endif
+
+	if (info.atime < info.mtime)
+		info.atime = info.mtime;
 
 	return true;
 }
@@ -630,7 +633,7 @@ bool fs::copy_file(const std::string& from, const std::string& to, bool overwrit
 	}
 
 	return true;
-#else
+#elif defined(__APPLE__) || defined(__linux__) || defined(__sun)
 	/* Source: http://stackoverflow.com/questions/2180079/how-can-i-copy-a-file-on-unix-using-c */
 
 	const int input = ::open(from.c_str(), O_RDONLY);
@@ -654,17 +657,13 @@ bool fs::copy_file(const std::string& from, const std::string& to, bool overwrit
 #if defined(__APPLE__)
 	// fcopyfile works on OS X 10.5+
 	if (::fcopyfile(input, output, 0, COPYFILE_ALL))
-#elif defined(__DragonFly__) || defined(__FreeBSD__)
-	if (::sendfile(input, output, 0, 0, NULL, NULL, 0))
 #elif defined(__linux__) || defined(__sun)
 	// sendfile will work with non-socket output (i.e. regular file) on Linux 2.6.33+
 	off_t bytes_copied = 0;
 	struct ::stat fileinfo = { 0 };
 	if (::fstat(input, &fileinfo) || ::sendfile(output, input, &bytes_copied, fileinfo.st_size))
-#else // NetBSD, OpenBSD, etc.
-	fmt::throw_exception("fs::copy_file() isn't implemented for this platform.\nFrom: %s\nTo: %s", from, to);
-	errno = 0;
-	if (true)
+#else
+#error "Native file copy implementation is missing"
 #endif
 	{
 		const int err = errno;
@@ -677,6 +676,31 @@ bool fs::copy_file(const std::string& from, const std::string& to, bool overwrit
 
 	::close(input);
 	::close(output);
+	return true;
+#else // fallback
+	{
+		std::ifstream out{to, std::ios::binary};
+		if (out.good() && !overwrite)
+		{
+			g_tls_error = to_error(EEXIST);
+			return false;
+		}
+	}
+
+	std::ifstream in{from, std::ios::binary};
+	std::ofstream out{to,  std::ios::binary};
+
+	if (!in.good() || !out.good())
+	{
+		g_tls_error = to_error(errno);
+		return false;
+	}
+
+	std::istreambuf_iterator<char> bin(in);
+	std::istreambuf_iterator<char> ein;
+	std::ostreambuf_iterator<char> bout(out);
+	std::copy(bin, ein, bout);
+
 	return true;
 #endif
 }
@@ -886,7 +910,10 @@ fs::file::file(const std::string& path, bs_t<open_mode> mode)
 			info.size = this->size();
 			info.atime = to_time(basic_info.LastAccessTime);
 			info.mtime = to_time(basic_info.ChangeTime);
-			info.ctime = to_time(basic_info.CreationTime);
+			info.ctime = info.mtime;
+
+			if (info.atime < info.mtime)
+				info.atime = info.mtime;
 
 			return info;
 		}
@@ -1033,7 +1060,10 @@ fs::file::file(const std::string& path, bs_t<open_mode> mode)
 			info.size = file_info.st_size;
 			info.atime = file_info.st_atime;
 			info.mtime = file_info.st_mtime;
-			info.ctime = file_info.st_ctime;
+			info.ctime = info.mtime;
+
+			if (info.atime < info.mtime)
+				info.atime = info.mtime;
 
 			return info;
 		}
@@ -1240,7 +1270,10 @@ bool fs::dir::open(const std::string& path)
 			info.size = ((u64)found.nFileSizeHigh << 32) | (u64)found.nFileSizeLow;
 			info.atime = to_time(found.ftLastAccessTime);
 			info.mtime = to_time(found.ftLastWriteTime);
-			info.ctime = to_time(found.ftCreationTime);
+			info.ctime = info.mtime;
+
+			if (info.atime < info.mtime)
+				info.atime = info.mtime;
 
 			m_entries.emplace_back(std::move(info));
 		}
@@ -1323,7 +1356,10 @@ bool fs::dir::open(const std::string& path)
 			info.size = file_info.st_size;
 			info.atime = file_info.st_atime;
 			info.mtime = file_info.st_mtime;
-			info.ctime = file_info.st_ctime;
+			info.ctime = info.mtime;
+
+			if (info.atime < info.mtime)
+				info.atime = info.mtime;
 
 			return true;
 		}
@@ -1348,8 +1384,9 @@ const std::string& fs::get_config_dir()
 		std::string dir;
 
 #ifdef _WIN32
-		wchar_t buf[2048];
-		if (GetModuleFileName(NULL, buf, ::size32(buf)) - 1 >= ::size32(buf) - 1)
+		wchar_t buf[32768];
+		if (GetEnvironmentVariable(L"RPCS3_CONFIG_DIR", buf, std::size(buf)) - 1 >= std::size(buf) - 1 &&
+			GetModuleFileName(NULL, buf, std::size(buf)) - 1 >= std::size(buf) - 1)
 		{
 			MessageBoxA(0, fmt::format("GetModuleFileName() failed: error %u.", GetLastError()).c_str(), "fs::get_config_dir()", MB_ICONERROR);
 			return dir; // empty
@@ -1361,10 +1398,16 @@ const std::string& fs::get_config_dir()
 
 		dir.resize(dir.rfind('/') + 1);
 #else
-		if (const char* home = ::getenv("XDG_CONFIG_HOME"))
-			dir = home;
+
+#ifdef __APPLE__
+		if (const char* home = ::getenv("HOME"))
+			dir = home + "/Library/Application Support"s;
+#else
+		if (const char* conf = ::getenv("XDG_CONFIG_HOME"))
+			dir = conf;
 		else if (const char* home = ::getenv("HOME"))
 			dir = home + "/.config"s;
+#endif
 		else // Just in case
 			dir = "./config";
 
@@ -1382,73 +1425,42 @@ const std::string& fs::get_config_dir()
 	return s_dir;
 }
 
-std::string fs::get_data_dir(const std::string& prefix, const std::string& location, const std::string& suffix)
+const std::string& fs::get_cache_dir()
 {
 	static const std::string s_dir = []
 	{
-		const std::string dir = get_config_dir() + "data/";
+		std::string dir;
+
+#ifdef _WIN32
+		dir = get_config_dir();
+#else
+
+#ifdef __APPLE__
+		if (const char* home = ::getenv("HOME"))
+			dir = home + "/Library/Caches"s;
+#else
+		if (const char* cache = ::getenv("XDG_CACHE_HOME"))
+			dir = cache;
+		else if (const char* conf = ::getenv("XDG_CONFIG_HOME"))
+			dir = conf;
+		else if (const char* home = ::getenv("HOME"))
+			dir = home + "/.cache"s;
+#endif
+		else // Just in case
+			dir = "./cache";
+
+		dir += "/rpcs3/";
 
 		if (!create_path(dir))
 		{
-			return get_config_dir();
+			std::printf("Failed to create configuration directory '%s' (%d).\n", dir.c_str(), errno);
 		}
+#endif
 
 		return dir;
 	}();
 
-	std::vector<u8> buf;
-	buf.reserve(location.size() + 1);
-
-	// Normalize location
-	for (char c : location)
-	{
-#ifdef _WIN32
-		if (c == '/' || c == '\\')
-#else
-		if (c == '/')
-#endif
-		{
-			if (buf.empty() || buf.back() != '/')
-			{
-				buf.push_back('/');
-			}
-
-			continue;
-		}
-
-		buf.push_back(c);
-	}
-
-	// Calculate hash
-	u8 hash[20];
-	sha1(buf.data(), buf.size(), hash);
-
-	// Concatenate
-	std::string result = fmt::format("%s%s/%016llx%08x-%s/", s_dir, prefix, reinterpret_cast<be_t<u64>&>(hash[0]), reinterpret_cast<be_t<u32>&>(hash[8]), suffix);
-
-	// Create dir if necessary
-	if (create_path(result))
-	{
-		// Acknowledge original location
-		file(result + ".location", rewrite).write(buf);
-	}
-
-	return result;
-}
-
-std::string fs::get_data_dir(const std::string& prefix, const std::string& path)
-{
-#ifdef _WIN32
-	const auto& delim = "/\\";
-#else
-	const auto& delim = "/";
-#endif
-
-	// Extract file name and location
-	const std::string& location = fs::get_parent_dir(path);
-	const std::size_t name_pos = path.find_first_not_of(delim, location.size());
-
-	return fs::get_data_dir(prefix, location, name_pos == -1 ? std::string{} : path.substr(name_pos));
+	return s_dir;
 }
 
 void fs::remove_all(const std::string& path, bool remove_root)

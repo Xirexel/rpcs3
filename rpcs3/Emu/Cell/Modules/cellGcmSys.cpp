@@ -1,11 +1,15 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "Emu/System.h"
 #include "Emu/IdManager.h"
 #include "Emu/Cell/PPUModule.h"
 
 #include "Emu/Memory/vm.h"
 #include "Emu/RSX/GSRender.h"
+#include "Emu/Cell/lv2/sys_ppu_thread.h"
+#include "Emu/Cell/lv2/sys_rsx.h"
+
 #include "cellGcmSys.h"
+#include "sysPrxForUser.h"
 
 #include <thread>
 
@@ -102,34 +106,35 @@ vm::ptr<CellGcmReportData> cellGcmGetReportDataAddressLocation(u32 index, u32 lo
 {
 	cellGcmSys.warning("cellGcmGetReportDataAddressLocation(index=%d, location=%d)", index, location);
 
-	if (location == CELL_GCM_LOCATION_LOCAL) {
-		if (index >= 2048) {
-			cellGcmSys.error("cellGcmGetReportDataAddressLocation: Wrong local index (%d)", index);
-			return vm::null;
-		}
-		return vm::ptr<CellGcmReportData>::make(fxm::get<CellGcmSysConfig>()->gcm_info.label_addr + 0x1400 + index * 0x10);
-	}
-
-	if (location == CELL_GCM_LOCATION_MAIN) {
-		if (index >= 1024 * 1024) {
+	if (location == CELL_GCM_LOCATION_MAIN)
+	{
+		if (index >= 1024 * 1024)
+		{
 			cellGcmSys.error("cellGcmGetReportDataAddressLocation: Wrong main index (%d)", index);
-			return vm::null;
 		}
-		return vm::ptr<CellGcmReportData>::make(RSXIOMem.RealAddr(index * 0x10));
+
+		return vm::ptr<CellGcmReportData>::make(RSXIOMem.RealAddr(0x0e000000 + index * 0x10));
 	}
 
-	cellGcmSys.error("cellGcmGetReportDataAddressLocation: Wrong location (%d)", location);
-	return vm::null;
+	// Anything else is Local
+
+	if (index >= 2048)
+	{
+		cellGcmSys.error("cellGcmGetReportDataAddressLocation: Wrong local index (%d)", index);
+	}
+
+	return vm::ptr<CellGcmReportData>::make(fxm::get<CellGcmSysConfig>()->gcm_info.label_addr + 0x1400 + index * 0x10);
 }
 
 u64 cellGcmGetTimeStamp(u32 index)
 {
 	cellGcmSys.trace("cellGcmGetTimeStamp(index=%d)", index);
 
-	if (index >= 2048) {
+	if (index >= 2048)
+	{
 		cellGcmSys.error("cellGcmGetTimeStamp: Wrong local index (%d)", index);
-		return 0;
 	}
+
 	return vm::read64(fxm::get<CellGcmSysConfig>()->gcm_info.label_addr + 0x1400 + index * 0x10);
 }
 
@@ -149,7 +154,7 @@ u32 cellGcmGetNotifyDataAddress(u32 index)
 		return 0;
 	}
 
-	return (entry << 20) + (index * 0x20);
+	return (entry << 20) + (index * 0x40);
 }
 
 /*
@@ -164,9 +169,9 @@ u32 cellGcmGetReport(u32 type, u32 index)
 {
 	cellGcmSys.warning("cellGcmGetReport(type=%d, index=%d)", type, index);
 
-	if (index >= 2048) {
+	if (index >= 2048)
+	{
 		cellGcmSys.error("cellGcmGetReport: Wrong local index (%d)", index);
-		return -1;
 	}
 
 	if (type < 1 || type > 5) {
@@ -181,10 +186,11 @@ u32 cellGcmGetReportDataAddress(u32 index)
 {
 	cellGcmSys.warning("cellGcmGetReportDataAddress(index=%d)", index);
 
-	if (index >= 2048) {
+	if (index >= 2048)
+	{
 		cellGcmSys.error("cellGcmGetReportDataAddress: Wrong local index (%d)", index);
-		return 0;
 	}
+
 	return fxm::get<CellGcmSysConfig>()->gcm_info.label_addr + 0x1400 + index * 0x10;
 }
 
@@ -346,7 +352,7 @@ void _cellGcmFunc15(vm::ptr<CellGcmContextData> context)
 u32 g_defaultCommandBufferBegin, g_defaultCommandBufferFragmentCount;
 
 // Called by cellGcmInit
-s32 _cellGcmInitBody(vm::pptr<CellGcmContextData> context, u32 cmdSize, u32 ioSize, u32 ioAddress)
+s32 _cellGcmInitBody(ppu_thread& ppu, vm::pptr<CellGcmContextData> context, u32 cmdSize, u32 ioSize, u32 ioAddress)
 {
 	cellGcmSys.warning("_cellGcmInitBody(context=**0x%x, cmdSize=0x%x, ioSize=0x%x, ioAddress=0x%x)", context, cmdSize, ioSize, ioAddress);
 
@@ -429,8 +435,11 @@ s32 _cellGcmInitBody(vm::pptr<CellGcmContextData> context, u32 cmdSize, u32 ioSi
 	ctrl.get = 0;
 	ctrl.ref = 0; // Set later to -1 at RSX initialization
 
-	render->intr_thread = idm::make_ptr<ppu_thread>("_gcm_intr_thread", 1, 0x4000);
-	render->intr_thread->run();
+	vm::var<u64> _tid;
+	vm::var<char[]> _name = vm::make_str("_gcm_intr_thread");
+	ppu_execute<&sys_ppu_thread_create>(ppu, +_tid, 128, 0, 1, 0x4000, SYS_PPU_THREAD_CREATE_INTERRUPT, +_name);
+	render->intr_thread = idm::get<named_thread<ppu_thread>>(*_tid);
+	render->intr_thread->state -= cpu_flag::stop;
 	render->main_mem_addr = 0;
 	render->isHLE = true;
 	render->label_addr = m_config->gcm_info.label_addr;
@@ -944,21 +953,26 @@ s32 cellGcmIoOffsetToAddress(u32 ioOffset, vm::ptr<u32> address)
 
 s32 gcmMapEaIoAddress(u32 ea, u32 io, u32 size, bool is_strict)
 {
-	if (!size || (ea & 0xFFFFF) || (io & 0xFFFFF) || (size & 0xFFFFF)
-	 || rsx::get_current_renderer()->main_mem_size < io + size)
+	if (!size || (ea & 0xFFFFF) || (io & 0xFFFFF) || (size & 0xFFFFF))
 	{
-		 return CELL_GCM_ERROR_FAILURE;
+		return CELL_GCM_ERROR_FAILURE;
 	}
 
-	ea >>=20, io >>= 20, size >>= 20;
+	// TODO: Pass correct flags and context
+	if (s32 error = sys_rsx_context_iomap(0, io, ea, size, 0))
+	{
+		return error;
+	}
+
+	ea >>= 20, io >>= 20, size >>= 20;
 
 	IoMapTable[ea] = size;
 
-	// Fill the offset table and map memory
+	// Fill the offset table
 	for (u32 i = 0; i < size; i++)
 	{
-		RSXIOMem.io[ea + i] = offsetTable.ioAddress[ea + i] = io + i;
-		RSXIOMem.ea[io + i] = offsetTable.eaAddress[io + i] = ea + i;
+		offsetTable.ioAddress[ea + i] = io + i;
+		offsetTable.eaAddress[io + i] = ea + i;
 	}
 
 	return CELL_OK;
@@ -1011,19 +1025,23 @@ s32 cellGcmMapMainMemory(u32 ea, u32 size, vm::ptr<u32> offset)
 		{
 			if (unmap_count >= (size >> 20))
 			{
-				*offset = io << 20;
+				if (s32 error = sys_rsx_context_iomap(0, io << 20, ea, size, 0))
+				{
+					return error;
+				}
 
 				ea >>= 20, size >>= 20;
 
 				IoMapTable[ea] = size;
 
-				// Fill the offset table and map memory
+				// Fill the offset table
 				for (u32 i = 0; i < size; i++)
 				{
-					RSXIOMem.io[ea + i] = offsetTable.ioAddress[ea + i] = io + i;
-					RSXIOMem.ea[io + i] = offsetTable.eaAddress[io + i] = ea + i;
+					offsetTable.ioAddress[ea + i] = io + i;
+					offsetTable.eaAddress[io + i] = ea + i;
 				}
 
+				*offset = io << 20;
 				return CELL_OK;
 			}
 		}
@@ -1068,8 +1086,8 @@ s32 cellGcmUnmapEaIoAddress(u32 ea)
 
 		for (u32 i = 0; i < size; i++)
 		{
-			RSXIOMem.io[ea + i] = offsetTable.ioAddress[ea + i] = 0xFFFF;
-			RSXIOMem.ea[io + i] = offsetTable.eaAddress[io + i] = 0xFFFF;
+			RSXIOMem.io[ea + i].release(offsetTable.ioAddress[ea + i] = 0xFFFF);
+			RSXIOMem.ea[io + i].release(offsetTable.eaAddress[io + i] = 0xFFFF);
 		}
 	}
 	else
@@ -1091,8 +1109,8 @@ s32 cellGcmUnmapIoAddress(u32 io)
 
 		for (u32 i = 0; i < size; i++)
 		{
-			RSXIOMem.io[ea + i] = offsetTable.ioAddress[ea + i] = 0xFFFF;
-			RSXIOMem.ea[io + i] = offsetTable.eaAddress[io + i] = 0xFFFF;
+			RSXIOMem.io[ea + i].release(offsetTable.ioAddress[ea + i] = 0xFFFF);
+			RSXIOMem.ea[io + i].release(offsetTable.eaAddress[io + i] = 0xFFFF);
 		}
 	}
 	else
@@ -1380,7 +1398,11 @@ s32 cellGcmCallback(ppu_thread& ppu, vm::ptr<CellGcmContextData> context, u32 co
 		if (isInCommandBufferExcept(getPos, newCommandBuffer.first, newCommandBuffer.second))
 			break;
 
-		ppu.test_state();
+		if (ppu.test_stopped())
+		{
+			return 0;
+		}
+
 		busy_wait();
 	}
 
