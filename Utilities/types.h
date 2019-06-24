@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
 #include <type_traits>
 #include <utility>
 #include <chrono>
@@ -83,6 +84,22 @@
 #define AUDIT(...) ((void)0)
 #endif
 
+#if defined(__cpp_lib_bit_cast) && (__cpp_lib_bit_cast >= 201806L)
+#include <bit>
+#else
+namespace std
+{
+	template <class To, class From, typename = std::enable_if_t<sizeof(To) == sizeof(From)>>
+	constexpr To bit_cast(const From& from) noexcept
+	{
+		static_assert(sizeof(To) == sizeof(From), "std::bit_cast<>: incompatible type size");
+
+		To result;
+		std::memcpy(&result, &from, sizeof(From));
+		return result;
+	}
+}
+#endif
 
 using schar  = signed char;
 using uchar  = unsigned char;
@@ -365,6 +382,9 @@ struct alignas(16) s128
 CHECK_SIZE_ALIGN(u128, 16, 16);
 CHECK_SIZE_ALIGN(s128, 16, 16);
 
+using f32 = float;
+using f64 = double;
+
 union alignas(2) f16
 {
 	u16 _u16;
@@ -375,21 +395,19 @@ union alignas(2) f16
 		_u16 = raw;
 	}
 
-	explicit operator float() const
+	explicit operator f32() const
 	{
 		// See http://stackoverflow.com/a/26779139
 		// The conversion doesn't handle NaN/Inf
 		u32 raw = ((_u16 & 0x8000) << 16) |             // Sign (just moved)
 		          (((_u16 & 0x7c00) + 0x1C000) << 13) | // Exponent ( exp - 15 + 127)
 		          ((_u16 & 0x03FF) << 13);              // Mantissa
-		return (float&)raw;
+
+		return std::bit_cast<f32>(raw);
 	}
 };
 
 CHECK_SIZE_ALIGN(f16, 2, 2);
-
-using f32 = float;
-using f64 = double;
 
 template <typename T, typename = std::enable_if_t<std::is_integral<T>::value>>
 constexpr T align(const T& value, ullong align)
@@ -401,13 +419,11 @@ template <typename T, typename T2>
 inline u32 offset32(T T2::*const mptr)
 {
 #ifdef _MSC_VER
-	static_assert(sizeof(mptr) == sizeof(u32), "Invalid pointer-to-member size");
-	return reinterpret_cast<const u32&>(mptr);
+	return std::bit_cast<u32>(mptr);
 #elif __GNUG__
-	static_assert(sizeof(mptr) == sizeof(std::size_t), "Invalid pointer-to-member size");
-	return static_cast<u32>(reinterpret_cast<const std::size_t&>(mptr));
+	return std::bit_cast<std::size_t>(mptr);
 #else
-	static_assert(sizeof(mptr) == 0, "Invalid pointer-to-member size");
+	static_assert(sizeof(mptr) == 0, "Unsupported pointer-to-member size");
 #endif
 }
 

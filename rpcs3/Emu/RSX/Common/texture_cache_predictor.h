@@ -139,7 +139,7 @@ namespace rsx
 
 	public:
 		texture_cache_predictor_entry(key_type _key)
-			: key(_key)
+			: key(std::move(_key))
 		{
 			reset();
 		}
@@ -342,7 +342,7 @@ namespace rsx
 
 		// Constructors
 		texture_cache_predictor(texture_cache_type* tex_cache)
-		    : m_tex_cache(tex_cache){};
+		    : m_tex_cache(tex_cache) {}
 		~texture_cache_predictor() = default;
 
 		// Trait wrappers
@@ -413,4 +413,4 @@ namespace std
 			return result;
 		}
 	};
-}; // namespace std
+} // namespace std

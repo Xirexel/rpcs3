@@ -239,6 +239,12 @@ error_code cellOskDialogLoadAsync(u32 container, vm::ptr<CellOskDialogParam> dia
 	return CELL_OK;
 }
 
+error_code cellOskDialogLoadAsyncExt()
+{
+	UNIMPLEMENTED_FUNC(cellOskDialog);
+	return CELL_OK;
+}
+
 error_code getText(vm::ptr<CellOskDialogCallbackReturnParam> OutputInfo, bool is_unload)
 {
 	if (!OutputInfo || OutputInfo->numCharsResultString < 0)
@@ -271,7 +277,7 @@ error_code getText(vm::ptr<CellOskDialogCallbackReturnParam> OutputInfo, bool is
 
 	bool do_copy = OutputInfo->pResultString && (OutputInfo->result == CELL_OSKDIALOG_INPUT_FIELD_RESULT_OK || (is_unload && OutputInfo->result == CELL_OSKDIALOG_INPUT_FIELD_RESULT_NO_INPUT_TEXT));
 
-	for (u32 i = 0; i < CELL_OSKDIALOG_STRING_SIZE - 1; i++)
+	for (s32 i = 0; i < CELL_OSKDIALOG_STRING_SIZE - 1; i++)
 	{
 		osk->osk_text_old[i] = osk->osk_text[i];
 
@@ -563,6 +569,7 @@ error_code cellOskDialogExtRegisterForceFinishCallback(vm::ptr<cellOskDialogForc
 void cellSysutil_OskDialog_init()
 {
 	REG_FUNC(cellSysutil, cellOskDialogLoadAsync);
+	REG_FUNC(cellSysutil, cellOskDialogLoadAsyncExt);
 	REG_FUNC(cellSysutil, cellOskDialogUnloadAsync);
 	REG_FUNC(cellSysutil, cellOskDialogGetSize);
 	REG_FUNC(cellSysutil, cellOskDialogAbort);

@@ -23,40 +23,49 @@
 #include <atomic>
 #include <thread>
 
-#ifdef _MSC_VER
-bool operator ==(const u128& lhs, const u128& rhs)
-{
-	return lhs.lo == rhs.lo && lhs.hi == rhs.hi;
-}
-#endif
+// Verify AVX availability for TSX transactions
+static const bool s_tsx_avx = utils::has_avx();
 
-static FORCE_INLINE void mov_rdata(u128* const dst, const u128* const src)
+// For special case
+static const bool s_tsx_haswell = utils::has_rtm() && !utils::has_mpx();
+
+static FORCE_INLINE bool cmp_rdata(const decltype(spu_thread::rdata)& lhs, const decltype(spu_thread::rdata)& rhs)
+{
+	const v128 a = (lhs[0] ^ rhs[0]) | (lhs[1] ^ rhs[1]);
+	const v128 b = (lhs[2] ^ rhs[2]) | (lhs[3] ^ rhs[3]);
+	const v128 c = (lhs[4] ^ rhs[4]) | (lhs[5] ^ rhs[5]);
+	const v128 d = (lhs[6] ^ rhs[6]) | (lhs[7] ^ rhs[7]);
+	const v128 r = (a | b) | (c | d);
+	return !(r._u64[0] | r._u64[1]);
+}
+
+static FORCE_INLINE void mov_rdata(decltype(spu_thread::rdata)& dst, const decltype(spu_thread::rdata)& src)
 {
 	{
-		const u128 data0 = src[0];
-		const u128 data1 = src[1];
-		const u128 data2 = src[2];
+		const v128 data0 = src[0];
+		const v128 data1 = src[1];
+		const v128 data2 = src[2];
 		dst[0] = data0;
 		dst[1] = data1;
 		dst[2] = data2;
 	}
 
 	{
-		const u128 data0 = src[3];
-		const u128 data1 = src[4];
-		const u128 data2 = src[5];
+		const v128 data0 = src[3];
+		const v128 data1 = src[4];
+		const v128 data2 = src[5];
 		dst[3] = data0;
 		dst[4] = data1;
 		dst[5] = data2;
 	}
 
 	{
-		const u128 data0 = src[6];
-		const u128 data1 = src[7];
+		const v128 data0 = src[6];
+		const v128 data1 = src[7];
 		dst[6] = data0;
 		dst[7] = data1;
 	}
-};
+}
 
 extern u64 get_timebased_time();
 extern u64 get_system_time();
@@ -182,85 +191,284 @@ const auto spu_putllc_tx = build_function_asm<u32(*)(u32 raddr, u64 rtime, const
 
 	Label fall = c.newLabel();
 	Label fail = c.newLabel();
-	Label retry = c.newLabel();
+	Label _ret = c.newLabel();
+	Label skip = c.newLabel();
+	Label next = c.newLabel();
+
+	if (utils::has_avx() && !s_tsx_avx)
+	{
+		c.vzeroupper();
+	}
+
+	// Create stack frame if necessary (Windows ABI has only 6 volatile vector registers)
+	c.push(x86::rbp);
+	c.push(x86::r13);
+	c.push(x86::r12);
+	c.push(x86::rbx);
+	c.sub(x86::rsp, 168);
+#ifdef _WIN32
+	if (s_tsx_avx)
+	{
+		c.vmovups(x86::oword_ptr(x86::rsp, 0), x86::xmm6);
+		c.vmovups(x86::oword_ptr(x86::rsp, 16), x86::xmm7);
+	}
+	else
+	{
+		c.movups(x86::oword_ptr(x86::rsp, 0), x86::xmm6);
+		c.movups(x86::oword_ptr(x86::rsp, 16), x86::xmm7);
+		c.movups(x86::oword_ptr(x86::rsp, 32), x86::xmm8);
+		c.movups(x86::oword_ptr(x86::rsp, 48), x86::xmm9);
+		c.movups(x86::oword_ptr(x86::rsp, 64), x86::xmm10);
+		c.movups(x86::oword_ptr(x86::rsp, 80), x86::xmm11);
+		c.movups(x86::oword_ptr(x86::rsp, 96), x86::xmm12);
+		c.movups(x86::oword_ptr(x86::rsp, 112), x86::xmm13);
+		c.movups(x86::oword_ptr(x86::rsp, 128), x86::xmm14);
+		c.movups(x86::oword_ptr(x86::rsp, 144), x86::xmm15);
+	}
+#endif
 
 	// Prepare registers
 	c.mov(x86::rax, imm_ptr(&vm::g_reservations));
-	c.mov(x86::r10, x86::qword_ptr(x86::rax));
+	c.mov(x86::rbx, x86::qword_ptr(x86::rax));
 	c.mov(x86::rax, imm_ptr(&vm::g_base_addr));
-	c.mov(x86::r11, x86::qword_ptr(x86::rax));
-	c.lea(x86::r11, x86::qword_ptr(x86::r11, args[0]));
+	c.mov(x86::rbp, x86::qword_ptr(x86::rax));
+	c.lea(x86::rbp, x86::qword_ptr(x86::rbp, args[0]));
 	c.shr(args[0], 4);
-	c.lea(x86::r10, x86::qword_ptr(x86::r10, args[0]));
-	c.mov(args[0].r32(), 3);
+	c.lea(x86::rbx, x86::qword_ptr(x86::rbx, args[0]));
+	c.xor_(x86::r12d, x86::r12d);
+	c.mov(x86::r13, args[1]);
 
-	// Prepare data (Windows has only 6 volatile vector registers)
-	c.vmovups(x86::ymm0, x86::yword_ptr(args[2], 0));
-	c.vmovups(x86::ymm1, x86::yword_ptr(args[2], 32));
-	c.vmovups(x86::ymm2, x86::yword_ptr(args[2], 64));
-	c.vmovups(x86::ymm3, x86::yword_ptr(args[2], 96));
-#ifdef _WIN32
-	c.vmovups(x86::ymm4, x86::yword_ptr(args[3], 0));
-	c.vmovups(x86::ymm5, x86::yword_ptr(args[3], 96));
-#else
-	c.vmovups(x86::ymm6, x86::yword_ptr(args[3], 0));
-	c.vmovups(x86::ymm7, x86::yword_ptr(args[3], 32));
-	c.vmovups(x86::ymm8, x86::yword_ptr(args[3], 64));
-	c.vmovups(x86::ymm9, x86::yword_ptr(args[3], 96));
-#endif
+	// Prepare data
+	if (s_tsx_avx)
+	{
+		c.vmovups(x86::ymm0, x86::yword_ptr(args[2], 0));
+		c.vmovups(x86::ymm1, x86::yword_ptr(args[2], 32));
+		c.vmovups(x86::ymm2, x86::yword_ptr(args[2], 64));
+		c.vmovups(x86::ymm3, x86::yword_ptr(args[2], 96));
+		c.vmovups(x86::ymm4, x86::yword_ptr(args[3], 0));
+		c.vmovups(x86::ymm5, x86::yword_ptr(args[3], 32));
+		c.vmovups(x86::ymm6, x86::yword_ptr(args[3], 64));
+		c.vmovups(x86::ymm7, x86::yword_ptr(args[3], 96));
+	}
+	else
+	{
+		c.movaps(x86::xmm0, x86::oword_ptr(args[2], 0));
+		c.movaps(x86::xmm1, x86::oword_ptr(args[2], 16));
+		c.movaps(x86::xmm2, x86::oword_ptr(args[2], 32));
+		c.movaps(x86::xmm3, x86::oword_ptr(args[2], 48));
+		c.movaps(x86::xmm4, x86::oword_ptr(args[2], 64));
+		c.movaps(x86::xmm5, x86::oword_ptr(args[2], 80));
+		c.movaps(x86::xmm6, x86::oword_ptr(args[2], 96));
+		c.movaps(x86::xmm7, x86::oword_ptr(args[2], 112));
+		c.movaps(x86::xmm8, x86::oword_ptr(args[3], 0));
+		c.movaps(x86::xmm9, x86::oword_ptr(args[3], 16));
+		c.movaps(x86::xmm10, x86::oword_ptr(args[3], 32));
+		c.movaps(x86::xmm11, x86::oword_ptr(args[3], 48));
+		c.movaps(x86::xmm12, x86::oword_ptr(args[3], 64));
+		c.movaps(x86::xmm13, x86::oword_ptr(args[3], 80));
+		c.movaps(x86::xmm14, x86::oword_ptr(args[3], 96));
+		c.movaps(x86::xmm15, x86::oword_ptr(args[3], 112));
+	}
 
 	// Begin transaction
-	Label begin = build_transaction_enter(c, fall);
-	c.cmp(x86::qword_ptr(x86::r10), args[1]);
+	build_transaction_enter(c, fall, x86::r12, 4);
+	c.mov(x86::rax, x86::qword_ptr(x86::rbx));
+	c.and_(x86::rax, -128);
+	c.cmp(x86::rax, x86::r13);
 	c.jne(fail);
-	c.vxorps(x86::ymm0, x86::ymm0, x86::yword_ptr(x86::r11, 0));
-	c.vxorps(x86::ymm1, x86::ymm1, x86::yword_ptr(x86::r11, 32));
-	c.vxorps(x86::ymm2, x86::ymm2, x86::yword_ptr(x86::r11, 64));
-	c.vxorps(x86::ymm3, x86::ymm3, x86::yword_ptr(x86::r11, 96));
-	c.vorps(x86::ymm0, x86::ymm0, x86::ymm1);
-	c.vorps(x86::ymm1, x86::ymm2, x86::ymm3);
-	c.vorps(x86::ymm0, x86::ymm1, x86::ymm0);
-	c.vptest(x86::ymm0, x86::ymm0);
-	c.jnz(fail);
-#ifdef _WIN32
-	c.vmovups(x86::ymm2, x86::yword_ptr(args[3], 32));
-	c.vmovups(x86::ymm3, x86::yword_ptr(args[3], 64));
-	c.vmovaps(x86::yword_ptr(x86::r11, 0), x86::ymm4);
-	c.vmovaps(x86::yword_ptr(x86::r11, 32), x86::ymm2);
-	c.vmovaps(x86::yword_ptr(x86::r11, 64), x86::ymm3);
-	c.vmovaps(x86::yword_ptr(x86::r11, 96), x86::ymm5);
-#else
-	c.vmovaps(x86::yword_ptr(x86::r11, 0), x86::ymm6);
-	c.vmovaps(x86::yword_ptr(x86::r11, 32), x86::ymm7);
-	c.vmovaps(x86::yword_ptr(x86::r11, 64), x86::ymm8);
-	c.vmovaps(x86::yword_ptr(x86::r11, 96), x86::ymm9);
-#endif
-	c.add(x86::qword_ptr(x86::r10), 2);
-	c.xend();
-	c.vzeroupper();
-	c.mov(x86::eax, 1);
-	c.ret();
+	c.test(x86::qword_ptr(x86::rbx), 127);
+	c.jnz(skip);
 
-	// Touch memory after transaction failure
+	if (s_tsx_avx)
+	{
+		c.vxorps(x86::ymm0, x86::ymm0, x86::yword_ptr(x86::rbp, 0));
+		c.vxorps(x86::ymm1, x86::ymm1, x86::yword_ptr(x86::rbp, 32));
+		c.vxorps(x86::ymm2, x86::ymm2, x86::yword_ptr(x86::rbp, 64));
+		c.vxorps(x86::ymm3, x86::ymm3, x86::yword_ptr(x86::rbp, 96));
+		c.vorps(x86::ymm0, x86::ymm0, x86::ymm1);
+		c.vorps(x86::ymm1, x86::ymm2, x86::ymm3);
+		c.vorps(x86::ymm0, x86::ymm1, x86::ymm0);
+		c.vptest(x86::ymm0, x86::ymm0);
+	}
+	else
+	{
+		c.xorps(x86::xmm0, x86::oword_ptr(x86::rbp, 0));
+		c.xorps(x86::xmm1, x86::oword_ptr(x86::rbp, 16));
+		c.xorps(x86::xmm2, x86::oword_ptr(x86::rbp, 32));
+		c.xorps(x86::xmm3, x86::oword_ptr(x86::rbp, 48));
+		c.xorps(x86::xmm4, x86::oword_ptr(x86::rbp, 64));
+		c.xorps(x86::xmm5, x86::oword_ptr(x86::rbp, 80));
+		c.xorps(x86::xmm6, x86::oword_ptr(x86::rbp, 96));
+		c.xorps(x86::xmm7, x86::oword_ptr(x86::rbp, 112));
+		c.orps(x86::xmm0, x86::xmm1);
+		c.orps(x86::xmm2, x86::xmm3);
+		c.orps(x86::xmm4, x86::xmm5);
+		c.orps(x86::xmm6, x86::xmm7);
+		c.orps(x86::xmm0, x86::xmm2);
+		c.orps(x86::xmm4, x86::xmm6);
+		c.orps(x86::xmm0, x86::xmm4);
+		c.ptest(x86::xmm0, x86::xmm0);
+	}
+
+	c.jnz(fail);
+
+	if (s_tsx_avx)
+	{
+		c.vmovaps(x86::yword_ptr(x86::rbp, 0), x86::ymm4);
+		c.vmovaps(x86::yword_ptr(x86::rbp, 32), x86::ymm5);
+		c.vmovaps(x86::yword_ptr(x86::rbp, 64), x86::ymm6);
+		c.vmovaps(x86::yword_ptr(x86::rbp, 96), x86::ymm7);
+	}
+	else
+	{
+		c.movaps(x86::oword_ptr(x86::rbp, 0), x86::xmm8);
+		c.movaps(x86::oword_ptr(x86::rbp, 16), x86::xmm9);
+		c.movaps(x86::oword_ptr(x86::rbp, 32), x86::xmm10);
+		c.movaps(x86::oword_ptr(x86::rbp, 48), x86::xmm11);
+		c.movaps(x86::oword_ptr(x86::rbp, 64), x86::xmm12);
+		c.movaps(x86::oword_ptr(x86::rbp, 80), x86::xmm13);
+		c.movaps(x86::oword_ptr(x86::rbp, 96), x86::xmm14);
+		c.movaps(x86::oword_ptr(x86::rbp, 112), x86::xmm15);
+	}
+
+	c.sub(x86::qword_ptr(x86::rbx), -128);
+	c.xend();
+	c.mov(x86::eax, 1);
+	c.jmp(_ret);
+
+	c.bind(skip);
+	c.xor_(x86::eax, x86::eax);
+	c.xor_(x86::r12d, x86::r12d);
+	build_transaction_abort(c, 0);
+	//c.jmp(fall);
+
 	c.bind(fall);
 	c.sar(x86::eax, 24);
 	c.js(fail);
-	c.sub(args[0].r32(), 1);
-	c.jz(retry);
-	c.lock().add(x86::qword_ptr(x86::r11), 0);
-	c.lock().add(x86::qword_ptr(x86::r10), 0);
-#ifdef _WIN32
-	c.vmovups(x86::ymm4, x86::yword_ptr(args[3], 0));
-	c.vmovups(x86::ymm5, x86::yword_ptr(args[3], 96));
-#endif
-	c.jmp(begin);
+	c.lock().add(x86::qword_ptr(x86::rbx), 1);
+	c.lock().bts(x86::dword_ptr(args[2], ::offset32(&spu_thread::state) - ::offset32(&spu_thread::rdata)), static_cast<u32>(cpu_flag::wait));
+
+	// Touch memory if transaction failed without RETRY flag on the first attempt
+	c.cmp(x86::r12, 1);
+	c.jne(next);
+	c.xor_(x86::rbp, 0xf80);
+	c.lock().add(x86::dword_ptr(x86::rbp), 0);
+	c.xor_(x86::rbp, 0xf80);
+
+	Label fall2 = c.newLabel();
+	Label fail2 = c.newLabel();
+
+	// Lightened transaction: only compare and swap data
+	c.bind(next);
+	build_transaction_enter(c, fall2, x86::r12, 666);
+
+	if (s_tsx_avx)
+	{
+		c.vxorps(x86::ymm0, x86::ymm0, x86::yword_ptr(x86::rbp, 0));
+		c.vxorps(x86::ymm1, x86::ymm1, x86::yword_ptr(x86::rbp, 32));
+		c.vxorps(x86::ymm2, x86::ymm2, x86::yword_ptr(x86::rbp, 64));
+		c.vxorps(x86::ymm3, x86::ymm3, x86::yword_ptr(x86::rbp, 96));
+		c.vorps(x86::ymm0, x86::ymm0, x86::ymm1);
+		c.vorps(x86::ymm1, x86::ymm2, x86::ymm3);
+		c.vorps(x86::ymm0, x86::ymm1, x86::ymm0);
+		c.vptest(x86::ymm0, x86::ymm0);
+	}
+	else
+	{
+		c.xorps(x86::xmm0, x86::oword_ptr(x86::rbp, 0));
+		c.xorps(x86::xmm1, x86::oword_ptr(x86::rbp, 16));
+		c.xorps(x86::xmm2, x86::oword_ptr(x86::rbp, 32));
+		c.xorps(x86::xmm3, x86::oword_ptr(x86::rbp, 48));
+		c.xorps(x86::xmm4, x86::oword_ptr(x86::rbp, 64));
+		c.xorps(x86::xmm5, x86::oword_ptr(x86::rbp, 80));
+		c.xorps(x86::xmm6, x86::oword_ptr(x86::rbp, 96));
+		c.xorps(x86::xmm7, x86::oword_ptr(x86::rbp, 112));
+		c.orps(x86::xmm0, x86::xmm1);
+		c.orps(x86::xmm2, x86::xmm3);
+		c.orps(x86::xmm4, x86::xmm5);
+		c.orps(x86::xmm6, x86::xmm7);
+		c.orps(x86::xmm0, x86::xmm2);
+		c.orps(x86::xmm4, x86::xmm6);
+		c.orps(x86::xmm0, x86::xmm4);
+		c.ptest(x86::xmm0, x86::xmm0);
+	}
+
+	c.jnz(fail2);
+
+	if (s_tsx_avx)
+	{
+		c.vmovaps(x86::yword_ptr(x86::rbp, 0), x86::ymm4);
+		c.vmovaps(x86::yword_ptr(x86::rbp, 32), x86::ymm5);
+		c.vmovaps(x86::yword_ptr(x86::rbp, 64), x86::ymm6);
+		c.vmovaps(x86::yword_ptr(x86::rbp, 96), x86::ymm7);
+	}
+	else
+	{
+		c.movaps(x86::oword_ptr(x86::rbp, 0), x86::xmm8);
+		c.movaps(x86::oword_ptr(x86::rbp, 16), x86::xmm9);
+		c.movaps(x86::oword_ptr(x86::rbp, 32), x86::xmm10);
+		c.movaps(x86::oword_ptr(x86::rbp, 48), x86::xmm11);
+		c.movaps(x86::oword_ptr(x86::rbp, 64), x86::xmm12);
+		c.movaps(x86::oword_ptr(x86::rbp, 80), x86::xmm13);
+		c.movaps(x86::oword_ptr(x86::rbp, 96), x86::xmm14);
+		c.movaps(x86::oword_ptr(x86::rbp, 112), x86::xmm15);
+	}
+
+	c.xend();
+	c.lock().add(x86::qword_ptr(x86::rbx), 127);
+	c.mov(x86::eax, 1);
+	c.jmp(_ret);
+
+	c.bind(fall2);
+	c.sar(x86::eax, 24);
+	c.js(fail2);
+	c.mov(x86::eax, 2);
+	c.jmp(_ret);
 
 	c.bind(fail);
 	build_transaction_abort(c, 0xff);
 	c.xor_(x86::eax, x86::eax);
-	c.ret();
-	c.bind(retry);
-	c.mov(x86::eax, 2);
+	c.jmp(_ret);
+
+	c.bind(fail2);
+	build_transaction_abort(c, 0xff);
+	c.lock().sub(x86::qword_ptr(x86::rbx), 1);
+	c.xor_(x86::eax, x86::eax);
+	//c.jmp(_ret);
+
+	c.bind(_ret);
+
+#ifdef _WIN32
+	if (s_tsx_avx)
+	{
+		c.vmovups(x86::xmm6, x86::oword_ptr(x86::rsp, 0));
+		c.vmovups(x86::xmm7, x86::oword_ptr(x86::rsp, 16));
+	}
+	else
+	{
+		c.movups(x86::xmm6, x86::oword_ptr(x86::rsp, 0));
+		c.movups(x86::xmm7, x86::oword_ptr(x86::rsp, 16));
+		c.movups(x86::xmm8, x86::oword_ptr(x86::rsp, 32));
+		c.movups(x86::xmm9, x86::oword_ptr(x86::rsp, 48));
+		c.movups(x86::xmm10, x86::oword_ptr(x86::rsp, 64));
+		c.movups(x86::xmm11, x86::oword_ptr(x86::rsp, 80));
+		c.movups(x86::xmm12, x86::oword_ptr(x86::rsp, 96));
+		c.movups(x86::xmm13, x86::oword_ptr(x86::rsp, 112));
+		c.movups(x86::xmm14, x86::oword_ptr(x86::rsp, 128));
+		c.movups(x86::xmm15, x86::oword_ptr(x86::rsp, 144));
+	}
+#endif
+
+	if (s_tsx_avx)
+	{
+		c.vzeroupper();
+	}
+
+	c.add(x86::rsp, 168);
+	c.pop(x86::rbx);
+	c.pop(x86::r12);
+	c.pop(x86::r13);
+	c.pop(x86::rbp);
 	c.ret();
 });
 
@@ -269,85 +477,437 @@ const auto spu_getll_tx = build_function_asm<u64(*)(u32 raddr, void* rdata)>([](
 	using namespace asmjit;
 
 	Label fall = c.newLabel();
+	Label _ret = c.newLabel();
+
+	if (utils::has_avx() && !s_tsx_avx)
+	{
+		c.vzeroupper();
+	}
+
+	// Create stack frame if necessary (Windows ABI has only 6 volatile vector registers)
+	c.push(x86::rbp);
+	c.push(x86::r13);
+	c.push(x86::r12);
+	c.push(x86::rbx);
+	c.sub(x86::rsp, 72);
+#ifdef _WIN32
+	if (!s_tsx_avx)
+	{
+		c.movups(x86::oword_ptr(x86::rsp, 0), x86::xmm6);
+		c.movups(x86::oword_ptr(x86::rsp, 16), x86::xmm7);
+	}
+#endif
 
 	// Prepare registers
 	c.mov(x86::rax, imm_ptr(&vm::g_reservations));
-	c.mov(x86::r10, x86::qword_ptr(x86::rax));
+	c.mov(x86::rbx, x86::qword_ptr(x86::rax));
 	c.mov(x86::rax, imm_ptr(&vm::g_base_addr));
-	c.mov(x86::r11, x86::qword_ptr(x86::rax));
-	c.lea(x86::r11, x86::qword_ptr(x86::r11, args[0]));
+	c.mov(x86::rbp, x86::qword_ptr(x86::rax));
+	c.lea(x86::rbp, x86::qword_ptr(x86::rbp, args[0]));
 	c.shr(args[0], 4);
-	c.lea(x86::r10, x86::qword_ptr(x86::r10, args[0]));
-	c.mov(args[0].r32(), 2);
+	c.lea(x86::rbx, x86::qword_ptr(x86::rbx, args[0]));
+	c.xor_(x86::r12d, x86::r12d);
+	c.mov(x86::r13, args[1]);
 
 	// Begin transaction
-	Label begin = build_transaction_enter(c, fall);
-	c.mov(x86::rax, x86::qword_ptr(x86::r10));
-	c.vmovaps(x86::ymm0, x86::yword_ptr(x86::r11, 0));
-	c.vmovaps(x86::ymm1, x86::yword_ptr(x86::r11, 32));
-	c.vmovaps(x86::ymm2, x86::yword_ptr(x86::r11, 64));
-	c.vmovaps(x86::ymm3, x86::yword_ptr(x86::r11, 96));
-	c.xend();
-	c.vmovups(x86::yword_ptr(args[1], 0), x86::ymm0);
-	c.vmovups(x86::yword_ptr(args[1], 32), x86::ymm1);
-	c.vmovups(x86::yword_ptr(args[1], 64), x86::ymm2);
-	c.vmovups(x86::yword_ptr(args[1], 96), x86::ymm3);
-	c.vzeroupper();
-	c.ret();
+	build_transaction_enter(c, fall, x86::r12, 16);
+	c.mov(x86::rax, x86::qword_ptr(x86::rbx));
 
-	// Touch memory after transaction failure
+	if (s_tsx_avx)
+	{
+		c.vmovaps(x86::ymm0, x86::yword_ptr(x86::rbp, 0));
+		c.vmovaps(x86::ymm1, x86::yword_ptr(x86::rbp, 32));
+		c.vmovaps(x86::ymm2, x86::yword_ptr(x86::rbp, 64));
+		c.vmovaps(x86::ymm3, x86::yword_ptr(x86::rbp, 96));
+	}
+	else
+	{
+		c.movaps(x86::xmm0, x86::oword_ptr(x86::rbp, 0));
+		c.movaps(x86::xmm1, x86::oword_ptr(x86::rbp, 16));
+		c.movaps(x86::xmm2, x86::oword_ptr(x86::rbp, 32));
+		c.movaps(x86::xmm3, x86::oword_ptr(x86::rbp, 48));
+		c.movaps(x86::xmm4, x86::oword_ptr(x86::rbp, 64));
+		c.movaps(x86::xmm5, x86::oword_ptr(x86::rbp, 80));
+		c.movaps(x86::xmm6, x86::oword_ptr(x86::rbp, 96));
+		c.movaps(x86::xmm7, x86::oword_ptr(x86::rbp, 112));
+	}
+
+	c.xend();
+
+	if (s_tsx_avx)
+	{
+		c.vmovups(x86::yword_ptr(x86::r13, 0), x86::ymm0);
+		c.vmovups(x86::yword_ptr(x86::r13, 32), x86::ymm1);
+		c.vmovups(x86::yword_ptr(x86::r13, 64), x86::ymm2);
+		c.vmovups(x86::yword_ptr(x86::r13, 96), x86::ymm3);
+	}
+	else
+	{
+		c.movaps(x86::oword_ptr(x86::r13, 0), x86::xmm0);
+		c.movaps(x86::oword_ptr(x86::r13, 16), x86::xmm1);
+		c.movaps(x86::oword_ptr(x86::r13, 32), x86::xmm2);
+		c.movaps(x86::oword_ptr(x86::r13, 48), x86::xmm3);
+		c.movaps(x86::oword_ptr(x86::r13, 64), x86::xmm4);
+		c.movaps(x86::oword_ptr(x86::r13, 80), x86::xmm5);
+		c.movaps(x86::oword_ptr(x86::r13, 96), x86::xmm6);
+		c.movaps(x86::oword_ptr(x86::r13, 112), x86::xmm7);
+	}
+
+	c.and_(x86::rax, -128);
+	c.jmp(_ret);
+
 	c.bind(fall);
-	c.pause();
-	c.mov(x86::rax, x86::qword_ptr(x86::r11));
-	c.mov(x86::rax, x86::qword_ptr(x86::r10));
-	c.sub(args[0], 1);
-	c.jnz(begin);
 	c.mov(x86::eax, 1);
+	//c.jmp(_ret);
+
+	c.bind(_ret);
+
+#ifdef _WIN32
+	if (!s_tsx_avx)
+	{
+		c.movups(x86::xmm6, x86::oword_ptr(x86::rsp, 0));
+		c.movups(x86::xmm7, x86::oword_ptr(x86::rsp, 16));
+	}
+#endif
+
+	if (s_tsx_avx)
+	{
+		c.vzeroupper();
+	}
+
+	c.add(x86::rsp, 72);
+	c.pop(x86::rbx);
+	c.pop(x86::r12);
+	c.pop(x86::r13);
+	c.pop(x86::rbp);
 	c.ret();
 });
 
-const auto spu_putlluc_tx = build_function_asm<bool(*)(u32 raddr, const void* rdata)>([](asmjit::X86Assembler& c, auto& args)
+const auto spu_getll_inexact = build_function_asm<u64(*)(u32 raddr, void* rdata)>([](asmjit::X86Assembler& c, auto& args)
+{
+	using namespace asmjit;
+
+	Label _ret = c.newLabel();
+
+	if (utils::has_avx() && !s_tsx_avx)
+	{
+		c.vzeroupper();
+	}
+
+	// Create stack frame if necessary (Windows ABI has only 6 volatile vector registers)
+	c.push(x86::rbp);
+	c.push(x86::r13);
+	c.push(x86::r12);
+	c.push(x86::rbx);
+	c.sub(x86::rsp, 72);
+#ifdef _WIN32
+	if (!s_tsx_avx)
+	{
+		c.movups(x86::oword_ptr(x86::rsp, 0), x86::xmm6);
+		c.movups(x86::oword_ptr(x86::rsp, 16), x86::xmm7);
+		c.movups(x86::oword_ptr(x86::rsp, 32), x86::xmm8);
+		c.movups(x86::oword_ptr(x86::rsp, 48), x86::xmm9);
+	}
+#endif
+
+	// Prepare registers
+	c.mov(x86::rax, imm_ptr(&vm::g_reservations));
+	c.mov(x86::rbx, x86::qword_ptr(x86::rax));
+	c.mov(x86::rax, imm_ptr(&vm::g_base_addr));
+	c.mov(x86::rbp, x86::qword_ptr(x86::rax));
+	c.lea(x86::rbp, x86::qword_ptr(x86::rbp, args[0]));
+	c.shr(args[0], 4);
+	c.lea(x86::rbx, x86::qword_ptr(x86::rbx, args[0]));
+	c.xor_(x86::r12d, x86::r12d);
+	c.mov(x86::r13, args[1]);
+
+	// Begin copying
+	Label begin = c.newLabel();
+	Label test0 = c.newLabel();
+	c.bind(begin);
+	c.mov(x86::rax, x86::qword_ptr(x86::rbx));
+
+	if (s_tsx_avx)
+	{
+		c.vmovaps(x86::ymm0, x86::yword_ptr(x86::rbp, 0));
+		c.vmovaps(x86::ymm1, x86::yword_ptr(x86::rbp, 32));
+		c.vmovaps(x86::ymm2, x86::yword_ptr(x86::rbp, 64));
+		c.vmovaps(x86::ymm3, x86::yword_ptr(x86::rbp, 96));
+	}
+	else
+	{
+		c.movaps(x86::xmm0, x86::oword_ptr(x86::rbp, 0));
+		c.movaps(x86::xmm1, x86::oword_ptr(x86::rbp, 16));
+		c.movaps(x86::xmm2, x86::oword_ptr(x86::rbp, 32));
+		c.movaps(x86::xmm3, x86::oword_ptr(x86::rbp, 48));
+		c.movaps(x86::xmm4, x86::oword_ptr(x86::rbp, 64));
+		c.movaps(x86::xmm5, x86::oword_ptr(x86::rbp, 80));
+		c.movaps(x86::xmm6, x86::oword_ptr(x86::rbp, 96));
+		c.movaps(x86::xmm7, x86::oword_ptr(x86::rbp, 112));
+	}
+
+	// Verify and retry if necessary.
+	c.mov(args[0], x86::rax);
+	c.xor_(args[0], x86::qword_ptr(x86::rbx));
+	c.test(args[0], -128);
+	c.jz(test0);
+	c.lea(x86::r12, x86::qword_ptr(x86::r12, 1));
+	c.jmp(begin);
+
+	c.bind(test0);
+	c.test(x86::eax, 127);
+	c.jz(_ret);
+	c.and_(x86::rax, -128);
+
+	// If there are lock bits set, verify data as well.
+	if (s_tsx_avx)
+	{
+		c.vxorps(x86::ymm4, x86::ymm0, x86::yword_ptr(x86::rbp, 0));
+		c.vxorps(x86::ymm5, x86::ymm1, x86::yword_ptr(x86::rbp, 32));
+		c.vorps(x86::ymm5, x86::ymm5, x86::ymm4);
+		c.vxorps(x86::ymm4, x86::ymm2, x86::yword_ptr(x86::rbp, 64));
+		c.vorps(x86::ymm5, x86::ymm5, x86::ymm4);
+		c.vxorps(x86::ymm4, x86::ymm3, x86::yword_ptr(x86::rbp, 96));
+		c.vorps(x86::ymm5, x86::ymm5, x86::ymm4);
+		c.vptest(x86::ymm5, x86::ymm5);
+	}
+	else
+	{
+		c.xorps(x86::xmm9, x86::xmm9);
+		c.movaps(x86::xmm8, x86::xmm0);
+		c.xorps(x86::xmm8, x86::oword_ptr(x86::rbp, 0));
+		c.orps(x86::xmm9, x86::xmm8);
+		c.movaps(x86::xmm8, x86::xmm1);
+		c.xorps(x86::xmm8, x86::oword_ptr(x86::rbp, 16));
+		c.orps(x86::xmm9, x86::xmm8);
+		c.movaps(x86::xmm8, x86::xmm2);
+		c.xorps(x86::xmm8, x86::oword_ptr(x86::rbp, 32));
+		c.orps(x86::xmm9, x86::xmm8);
+		c.movaps(x86::xmm8, x86::xmm3);
+		c.xorps(x86::xmm8, x86::oword_ptr(x86::rbp, 48));
+		c.orps(x86::xmm9, x86::xmm8);
+		c.movaps(x86::xmm8, x86::xmm4);
+		c.xorps(x86::xmm8, x86::oword_ptr(x86::rbp, 64));
+		c.orps(x86::xmm9, x86::xmm8);
+		c.movaps(x86::xmm8, x86::xmm5);
+		c.xorps(x86::xmm8, x86::oword_ptr(x86::rbp, 80));
+		c.orps(x86::xmm9, x86::xmm8);
+		c.movaps(x86::xmm8, x86::xmm6);
+		c.xorps(x86::xmm8, x86::oword_ptr(x86::rbp, 96));
+		c.orps(x86::xmm9, x86::xmm8);
+		c.movaps(x86::xmm8, x86::xmm7);
+		c.xorps(x86::xmm8, x86::oword_ptr(x86::rbp, 112));
+		c.orps(x86::xmm9, x86::xmm8);
+		c.ptest(x86::xmm9, x86::xmm9);
+	}
+
+	c.jz(_ret);
+	c.lea(x86::r12, x86::qword_ptr(x86::r12, 2));
+	c.jmp(begin);
+
+	c.bind(_ret);
+
+	if (s_tsx_avx)
+	{
+		c.vmovups(x86::yword_ptr(x86::r13, 0), x86::ymm0);
+		c.vmovups(x86::yword_ptr(x86::r13, 32), x86::ymm1);
+		c.vmovups(x86::yword_ptr(x86::r13, 64), x86::ymm2);
+		c.vmovups(x86::yword_ptr(x86::r13, 96), x86::ymm3);
+	}
+	else
+	{
+		c.movaps(x86::oword_ptr(x86::r13, 0), x86::xmm0);
+		c.movaps(x86::oword_ptr(x86::r13, 16), x86::xmm1);
+		c.movaps(x86::oword_ptr(x86::r13, 32), x86::xmm2);
+		c.movaps(x86::oword_ptr(x86::r13, 48), x86::xmm3);
+		c.movaps(x86::oword_ptr(x86::r13, 64), x86::xmm4);
+		c.movaps(x86::oword_ptr(x86::r13, 80), x86::xmm5);
+		c.movaps(x86::oword_ptr(x86::r13, 96), x86::xmm6);
+		c.movaps(x86::oword_ptr(x86::r13, 112), x86::xmm7);
+	}
+
+#ifdef _WIN32
+	if (!s_tsx_avx)
+	{
+		c.movups(x86::xmm6, x86::oword_ptr(x86::rsp, 0));
+		c.movups(x86::xmm7, x86::oword_ptr(x86::rsp, 16));
+		c.movups(x86::xmm8, x86::oword_ptr(x86::rsp, 32));
+		c.movups(x86::xmm9, x86::oword_ptr(x86::rsp, 48));
+	}
+#endif
+
+	if (s_tsx_avx)
+	{
+		c.vzeroupper();
+	}
+
+	c.add(x86::rsp, 72);
+	c.pop(x86::rbx);
+	c.pop(x86::r12);
+	c.pop(x86::r13);
+	c.pop(x86::rbp);
+	c.ret();
+});
+
+const auto spu_putlluc_tx = build_function_asm<u32(*)(u32 raddr, const void* rdata, spu_thread* _spu)>([](asmjit::X86Assembler& c, auto& args)
 {
 	using namespace asmjit;
 
 	Label fall = c.newLabel();
+	Label _ret = c.newLabel();
+	Label skip = c.newLabel();
+	Label next = c.newLabel();
+
+	if (utils::has_avx() && !s_tsx_avx)
+	{
+		c.vzeroupper();
+	}
+
+	// Create stack frame if necessary (Windows ABI has only 6 volatile vector registers)
+	c.push(x86::rbp);
+	c.push(x86::r13);
+	c.push(x86::r12);
+	c.push(x86::rbx);
+	c.sub(x86::rsp, 40);
+#ifdef _WIN32
+	if (!s_tsx_avx)
+	{
+		c.movups(x86::oword_ptr(x86::rsp, 0), x86::xmm6);
+		c.movups(x86::oword_ptr(x86::rsp, 16), x86::xmm7);
+	}
+#endif
 
 	// Prepare registers
 	c.mov(x86::rax, imm_ptr(&vm::g_reservations));
-	c.mov(x86::r10, x86::qword_ptr(x86::rax));
+	c.mov(x86::rbx, x86::qword_ptr(x86::rax));
 	c.mov(x86::rax, imm_ptr(&vm::g_base_addr));
-	c.mov(x86::r11, x86::qword_ptr(x86::rax));
-	c.lea(x86::r11, x86::qword_ptr(x86::r11, args[0]));
+	c.mov(x86::rbp, x86::qword_ptr(x86::rax));
+	c.lea(x86::rbp, x86::qword_ptr(x86::rbp, args[0]));
 	c.shr(args[0], 4);
-	c.lea(x86::r10, x86::qword_ptr(x86::r10, args[0]));
-	c.mov(args[0].r32(), 2);
+	c.lea(x86::rbx, x86::qword_ptr(x86::rbx, args[0]));
+	c.xor_(x86::r12d, x86::r12d);
+	c.mov(x86::r13, args[1]);
 
 	// Prepare data
-	c.vmovups(x86::ymm0, x86::yword_ptr(args[1], 0));
-	c.vmovups(x86::ymm1, x86::yword_ptr(args[1], 32));
-	c.vmovups(x86::ymm2, x86::yword_ptr(args[1], 64));
-	c.vmovups(x86::ymm3, x86::yword_ptr(args[1], 96));
+	if (s_tsx_avx)
+	{
+		c.vmovups(x86::ymm0, x86::yword_ptr(args[1], 0));
+		c.vmovups(x86::ymm1, x86::yword_ptr(args[1], 32));
+		c.vmovups(x86::ymm2, x86::yword_ptr(args[1], 64));
+		c.vmovups(x86::ymm3, x86::yword_ptr(args[1], 96));
+	}
+	else
+	{
+		c.movaps(x86::xmm0, x86::oword_ptr(args[1], 0));
+		c.movaps(x86::xmm1, x86::oword_ptr(args[1], 16));
+		c.movaps(x86::xmm2, x86::oword_ptr(args[1], 32));
+		c.movaps(x86::xmm3, x86::oword_ptr(args[1], 48));
+		c.movaps(x86::xmm4, x86::oword_ptr(args[1], 64));
+		c.movaps(x86::xmm5, x86::oword_ptr(args[1], 80));
+		c.movaps(x86::xmm6, x86::oword_ptr(args[1], 96));
+		c.movaps(x86::xmm7, x86::oword_ptr(args[1], 112));
+	}
 
 	// Begin transaction
-	Label begin = build_transaction_enter(c, fall);
-	c.vmovaps(x86::yword_ptr(x86::r11, 0), x86::ymm0);
-	c.vmovaps(x86::yword_ptr(x86::r11, 32), x86::ymm1);
-	c.vmovaps(x86::yword_ptr(x86::r11, 64), x86::ymm2);
-	c.vmovaps(x86::yword_ptr(x86::r11, 96), x86::ymm3);
-	c.add(x86::qword_ptr(x86::r10), 2);
-	c.xend();
-	c.vzeroupper();
-	c.mov(x86::eax, 1);
-	c.ret();
+	build_transaction_enter(c, fall, x86::r12, 8);
+	c.test(x86::dword_ptr(x86::rbx), 127);
+	c.jnz(skip);
 
-	// Touch memory after transaction failure
-	c.bind(fall);
-	c.pause();
-	c.lock().add(x86::qword_ptr(x86::r11), 0);
-	c.lock().add(x86::qword_ptr(x86::r10), 0);
-	c.sub(args[0], 1);
-	c.jnz(begin);
+	if (s_tsx_avx)
+	{
+		c.vmovaps(x86::yword_ptr(x86::rbp, 0), x86::ymm0);
+		c.vmovaps(x86::yword_ptr(x86::rbp, 32), x86::ymm1);
+		c.vmovaps(x86::yword_ptr(x86::rbp, 64), x86::ymm2);
+		c.vmovaps(x86::yword_ptr(x86::rbp, 96), x86::ymm3);
+	}
+	else
+	{
+		c.movaps(x86::oword_ptr(x86::rbp, 0), x86::xmm0);
+		c.movaps(x86::oword_ptr(x86::rbp, 16), x86::xmm1);
+		c.movaps(x86::oword_ptr(x86::rbp, 32), x86::xmm2);
+		c.movaps(x86::oword_ptr(x86::rbp, 48), x86::xmm3);
+		c.movaps(x86::oword_ptr(x86::rbp, 64), x86::xmm4);
+		c.movaps(x86::oword_ptr(x86::rbp, 80), x86::xmm5);
+		c.movaps(x86::oword_ptr(x86::rbp, 96), x86::xmm6);
+		c.movaps(x86::oword_ptr(x86::rbp, 112), x86::xmm7);
+	}
+
+	c.sub(x86::qword_ptr(x86::rbx), -128);
+	c.xend();
+	c.mov(x86::eax, 1);
+	c.jmp(_ret);
+
+	c.bind(skip);
 	c.xor_(x86::eax, x86::eax);
+	c.xor_(x86::r12d, x86::r12d);
+	build_transaction_abort(c, 0);
+	//c.jmp(fall);
+
+	c.bind(fall);
+	c.lock().add(x86::qword_ptr(x86::rbx), 1);
+	c.lock().bts(x86::dword_ptr(args[2], ::offset32(&spu_thread::state)), static_cast<u32>(cpu_flag::wait));
+
+	// Touch memory if transaction failed without RETRY flag on the first attempt
+	c.cmp(x86::r12, 1);
+	c.jne(next);
+	c.xor_(x86::rbp, 0xf80);
+	c.lock().add(x86::dword_ptr(x86::rbp), 0);
+	c.xor_(x86::rbp, 0xf80);
+
+	Label fall2 = c.newLabel();
+
+	// Lightened transaction
+	c.bind(next);
+	build_transaction_enter(c, fall2, x86::r12, 666);
+
+	if (s_tsx_avx)
+	{
+		c.vmovaps(x86::yword_ptr(x86::rbp, 0), x86::ymm0);
+		c.vmovaps(x86::yword_ptr(x86::rbp, 32), x86::ymm1);
+		c.vmovaps(x86::yword_ptr(x86::rbp, 64), x86::ymm2);
+		c.vmovaps(x86::yword_ptr(x86::rbp, 96), x86::ymm3);
+	}
+	else
+	{
+		c.movaps(x86::oword_ptr(x86::rbp, 0), x86::xmm0);
+		c.movaps(x86::oword_ptr(x86::rbp, 16), x86::xmm1);
+		c.movaps(x86::oword_ptr(x86::rbp, 32), x86::xmm2);
+		c.movaps(x86::oword_ptr(x86::rbp, 48), x86::xmm3);
+		c.movaps(x86::oword_ptr(x86::rbp, 64), x86::xmm4);
+		c.movaps(x86::oword_ptr(x86::rbp, 80), x86::xmm5);
+		c.movaps(x86::oword_ptr(x86::rbp, 96), x86::xmm6);
+		c.movaps(x86::oword_ptr(x86::rbp, 112), x86::xmm7);
+	}
+
+	c.xend();
+	c.lock().add(x86::qword_ptr(x86::rbx), 127);
+	c.mov(x86::eax, 1);
+	c.jmp(_ret);
+
+	c.bind(fall2);
+	c.mov(x86::eax, 2);
+	//c.jmp(_ret);
+
+	c.bind(_ret);
+
+#ifdef _WIN32
+	if (!s_tsx_avx)
+	{
+		c.movups(x86::xmm6, x86::oword_ptr(x86::rsp, 0));
+		c.movups(x86::xmm7, x86::oword_ptr(x86::rsp, 16));
+	}
+#endif
+
+	if (s_tsx_avx)
+	{
+		c.vzeroupper();
+	}
+
+	c.add(x86::rsp, 40);
+	c.pop(x86::rbx);
+	c.pop(x86::r12);
+	c.pop(x86::r13);
+	c.pop(x86::rbp);
 	c.ret();
 });
 
@@ -418,6 +978,11 @@ std::string spu_thread::get_name() const
 std::string spu_thread::dump() const
 {
 	std::string ret = cpu_thread::dump();
+
+	if (group)
+	{
+		fmt::append(ret, "\nGroup ID: 0x%x", group->id);
+	}
 
 	fmt::append(ret, "\nBlock Weight: %u (Retreats: %u)", block_counter, block_failure);
 	fmt::append(ret, "\n[%s]", ch_mfc_cmd);
@@ -578,7 +1143,7 @@ void spu_thread::cpu_task()
 				}
 			}
 
-			spu_runtime::g_dispatcher[pc / 4](*this, vm::_ptr<u8>(offset), nullptr);
+			spu_runtime::g_gateway(*this, vm::_ptr<u8>(offset), nullptr);
 		}
 
 		// Print some stats
@@ -780,28 +1345,28 @@ void spu_thread::do_dma_transfer(const spu_mfc_cmd& args)
 		{
 			auto& res = vm::reservation_lock(eal, 1);
 			*reinterpret_cast<u8*>(dst) = *reinterpret_cast<const u8*>(src);
-			res.release(res.load() + 1);
+			res.release(res.load() + 127);
 			break;
 		}
 		case 2:
 		{
 			auto& res = vm::reservation_lock(eal, 2);
 			*reinterpret_cast<u16*>(dst) = *reinterpret_cast<const u16*>(src);
-			res.release(res.load() + 1);
+			res.release(res.load() + 127);
 			break;
 		}
 		case 4:
 		{
 			auto& res = vm::reservation_lock(eal, 4);
 			*reinterpret_cast<u32*>(dst) = *reinterpret_cast<const u32*>(src);
-			res.release(res.load() + 1);
+			res.release(res.load() + 127);
 			break;
 		}
 		case 8:
 		{
 			auto& res = vm::reservation_lock(eal, 8);
 			*reinterpret_cast<u64*>(dst) = *reinterpret_cast<const u64*>(src);
-			res.release(res.load() + 1);
+			res.release(res.load() + 127);
 			break;
 		}
 		default:
@@ -813,14 +1378,14 @@ void spu_thread::do_dma_transfer(const spu_mfc_cmd& args)
 
 				while (size)
 				{
-					*reinterpret_cast<u128*>(dst) = *reinterpret_cast<const u128*>(src);
+					*reinterpret_cast<v128*>(dst) = *reinterpret_cast<const v128*>(src);
 
 					dst += 16;
 					src += 16;
 					size -= 16;
 				}
 
-				res.release(res.load() + 1);
+				res.release(res.load() + 127);
 				break;
 			}
 
@@ -828,7 +1393,7 @@ void spu_thread::do_dma_transfer(const spu_mfc_cmd& args)
 
 			while (size >= 128)
 			{
-				mov_rdata(reinterpret_cast<u128*>(dst), reinterpret_cast<const u128*>(src));
+				mov_rdata(*reinterpret_cast<decltype(spu_thread::rdata)*>(dst), *reinterpret_cast<const decltype(spu_thread::rdata)*>(src));
 
 				dst += 128;
 				src += 128;
@@ -837,7 +1402,7 @@ void spu_thread::do_dma_transfer(const spu_mfc_cmd& args)
 
 			while (size)
 			{
-				*reinterpret_cast<u128*>(dst) = *reinterpret_cast<const u128*>(src);
+				*reinterpret_cast<v128*>(dst) = *reinterpret_cast<const v128*>(src);
 
 				dst += 16;
 				src += 16;
@@ -883,7 +1448,7 @@ void spu_thread::do_dma_transfer(const spu_mfc_cmd& args)
 	{
 		while (size >= 128)
 		{
-			mov_rdata(reinterpret_cast<u128*>(dst), reinterpret_cast<const u128*>(src));
+			mov_rdata(*reinterpret_cast<decltype(spu_thread::rdata)*>(dst), *reinterpret_cast<const decltype(spu_thread::rdata)*>(src));
 
 			dst += 128;
 			src += 128;
@@ -892,7 +1457,7 @@ void spu_thread::do_dma_transfer(const spu_mfc_cmd& args)
 
 		while (size)
 		{
-			*reinterpret_cast<u128*>(dst) = *reinterpret_cast<const u128*>(src);
+			*reinterpret_cast<v128*>(dst) = *reinterpret_cast<const v128*>(src);
 
 			dst += 16;
 			src += 16;
@@ -1017,7 +1582,7 @@ void spu_thread::do_putlluc(const spu_mfc_cmd& args)
 	if (raddr && addr == raddr)
 	{
 		// Last check for event before we clear the reservation
-		if ((vm::reservation_acquire(addr, 128) & ~1ull) != rtime || rdata != vm::_ref<decltype(rdata)>(addr))
+		if ((vm::reservation_acquire(addr, 128) & -128) != rtime || !cmp_rdata(rdata, vm::_ref<decltype(rdata)>(addr)))
 		{
 			ch_event_stat |= SPU_EVENT_LR;
 		}
@@ -1030,17 +1595,31 @@ void spu_thread::do_putlluc(const spu_mfc_cmd& args)
 	// Store unconditionally
 	if (LIKELY(g_use_rtm))
 	{
-		u64 count = 1;
+		const u32 result = spu_putlluc_tx(addr, to_write.data(), this);
 
-		while (!spu_putlluc_tx(addr, to_write.data()))
+		if (result == 2)
 		{
-			std::this_thread::yield();
-			count += 2;
-		}
+			cpu_thread::suspend_all cpu_lock(this);
 
-		if (count > 5)
-		{
-			LOG_ERROR(SPU, "%s took too long: %u", args.cmd, count);
+			// Try to obtain bit 7 (+64)
+			if (!atomic_storage<u64>::bts(vm::reservation_acquire(addr, 128).raw(), 6))
+			{
+				auto& data = vm::_ref<decltype(rdata)>(addr);
+				mov_rdata(data, to_write);
+
+				// Keep checking written data against a rogue transaction sneak in
+				while (std::atomic_thread_fence(std::memory_order_seq_cst), !cmp_rdata(data, to_write))
+				{
+					mov_rdata(data, to_write);
+				}
+
+				vm::reservation_acquire(addr, 128) += 63;
+			}
+			else
+			{
+				// Give up if another PUTLLUC command took precedence
+				vm::reservation_acquire(addr, 128) -= 1;
+			}
 		}
 	}
 	else
@@ -1055,13 +1634,13 @@ void spu_thread::do_putlluc(const spu_mfc_cmd& args)
 			// Full lock (heavyweight)
 			// TODO: vm::check_addr
 			vm::writer_lock lock(addr);
-			mov_rdata(data.data(), to_write.data());
-			res.release(res.load() + 1);
+			mov_rdata(data, to_write);
+			res.release(res.load() + 127);
 		}
 		else
 		{
-			mov_rdata(data.data(), to_write.data());
-			res.release(res.load() + 1);
+			mov_rdata(data, to_write);
+			res.release(res.load() + 127);
 		}
 	}
 
@@ -1180,6 +1759,8 @@ bool spu_thread::process_mfc_cmd()
 	// Stall infinitely if MFC queue is full
 	while (UNLIKELY(mfc_size >= 16))
 	{
+		state += cpu_flag::wait;
+
 		if (is_stopped())
 		{
 			return false;
@@ -1204,10 +1785,12 @@ bool spu_thread::process_mfc_cmd()
 
 		if (is_polling)
 		{
-			rtime = vm::reservation_acquire(addr, 128);
+			rtime = vm::reservation_acquire(addr, 128) & -128;
 
-			while (rdata == data && vm::reservation_acquire(addr, 128) == rtime)
+			while (cmp_rdata(rdata, data) && (vm::reservation_acquire(addr, 128)) == rtime)
 			{
+				state += cpu_flag::wait;
+
 				if (is_stopped())
 				{
 					break;
@@ -1215,43 +1798,46 @@ bool spu_thread::process_mfc_cmd()
 
 				thread_ctrl::wait_for(100);
 			}
+
+			if (test_stopped())
+			{
+				return false;
+			}
 		}
 
-		if (LIKELY(g_use_rtm))
+		if (LIKELY(g_use_rtm && !g_cfg.core.spu_accurate_getllar && raddr != addr))
 		{
-			u64 count = 1;
+			// TODO: maybe always start from a transaction
+			ntime = spu_getll_inexact(addr, dst.data());
+		}
+		else if (g_use_rtm)
+		{
+			ntime = spu_getll_tx(addr, dst.data());
 
-			if (g_cfg.core.spu_accurate_getllar)
+			if (ntime == 1)
 			{
-			 	while ((ntime = spu_getll_tx(addr, dst.data())) & 1)
+				if (!g_cfg.core.spu_accurate_getllar)
 				{
-					std::this_thread::yield();
-					count += 2;
+					ntime = spu_getll_inexact(addr, dst.data());
 				}
-			}
-			else
-			{
-				for (;; count++, busy_wait(300))
+				else
 				{
-					ntime = vm::reservation_acquire(addr, 128);
-					dst = data;
+					cpu_thread::suspend_all cpu_lock(this);
 
-					if (LIKELY(vm::reservation_acquire(addr, 128) == ntime))
+					while (vm::reservation_acquire(addr, 128) & 127)
 					{
-						break;
+						busy_wait(100);
 					}
-				}
-			}
 
-			if (count > 15)
-			{
-				LOG_ERROR(SPU, "%s took too long: %u", ch_mfc_cmd.cmd, count);
+					ntime = vm::reservation_acquire(addr, 128);
+					mov_rdata(dst, data);
+				}
 			}
 		}
 		else
 		{
 			auto& res = vm::reservation_lock(addr, 128);
-			const u64 old_time = res.load() & ~1ull;
+			const u64 old_time = res.load() & -128;
 
 			if (g_cfg.core.spu_accurate_getllar)
 			{
@@ -1262,37 +1848,37 @@ bool spu_thread::process_mfc_cmd()
 				vm::writer_lock lock(addr);
 
 				ntime = old_time;
-				mov_rdata(dst.data(), data.data());
+				mov_rdata(dst, data);
 				res.release(old_time);
 			}
 			else
 			{
 				ntime = old_time;
-				mov_rdata(dst.data(), data.data());
+				mov_rdata(dst, data);
 				res.release(old_time);
 			}
 		}
 
-		if (const u32 _addr = raddr)
+		if (raddr && raddr != addr)
 		{
 			// Last check for event before we replace the reservation with a new one
-			if ((vm::reservation_acquire(_addr, 128) & ~1ull) != rtime || rdata != vm::_ref<decltype(rdata)>(_addr))
+			if ((vm::reservation_acquire(raddr, 128) & -128) != rtime || !cmp_rdata(rdata, vm::_ref<decltype(rdata)>(raddr)))
 			{
 				ch_event_stat |= SPU_EVENT_LR;
-
-				if (_addr == addr)
-				{
-					// Lost current reservation
-					raddr = 0;
-					ch_atomic_stat.set_value(MFC_GETLLAR_SUCCESS);
-					return true;
-				}
+			}
+		}
+		else if (raddr == addr)
+		{
+			// Lost previous reservation on polling
+			if (ntime != rtime || !cmp_rdata(rdata, dst))
+			{
+				ch_event_stat |= SPU_EVENT_LR;
 			}
 		}
 
 		raddr = addr;
 		rtime = ntime;
-		mov_rdata(rdata.data(), dst.data());
+		mov_rdata(rdata, dst);
 
 		ch_atomic_stat.set_value(MFC_GETLLAR_SUCCESS);
 		return true;
@@ -1304,29 +1890,42 @@ bool spu_thread::process_mfc_cmd()
 		const u32 addr = ch_mfc_cmd.eal & -128u;
 		u32 result = 0;
 
-		if (raddr == addr && rtime == (vm::reservation_acquire(raddr, 128) & ~1ull))
+		if (raddr == addr)
 		{
 			const auto& to_write = _ref<decltype(rdata)>(ch_mfc_cmd.lsa & 0x3ff80);
 
 			if (LIKELY(g_use_rtm))
 			{
-				while (true)
+				result = spu_putllc_tx(addr, rtime, rdata.data(), to_write.data());
+
+				if (result == 2)
 				{
-					result = spu_putllc_tx(addr, rtime, rdata.data(), to_write.data());
+					result = 0;
 
-					if (result < 2)
+					cpu_thread::suspend_all cpu_lock(this);
+
+					// Give up if other PUTLLC/PUTLLUC commands are in progress
+					if (!vm::reservation_acquire(addr, 128).try_dec(rtime + 1))
 					{
-						break;
-					}
+						auto& data = vm::_ref<decltype(rdata)>(addr);
 
-					// Retry
-					std::this_thread::yield();
+						if ((vm::reservation_acquire(addr, 128) & -128) == rtime && cmp_rdata(rdata, data))
+						{
+							mov_rdata(data, to_write);
+							vm::reservation_acquire(addr, 128) += 127;
+							result = 1;
+						}
+						else
+						{
+							vm::reservation_acquire(addr, 128) -= 1;
+						}
+					}
 				}
 			}
-			else if (auto& data = vm::_ref<decltype(rdata)>(addr); rdata == data)
+			else if (auto& data = vm::_ref<decltype(rdata)>(addr); rtime == (vm::reservation_acquire(raddr, 128) & -128) && cmp_rdata(rdata, data))
 			{
 				auto& res = vm::reservation_lock(raddr, 128);
-				const u64 old_time = res.load() & ~1ull;
+				const u64 old_time = res.load() & -128;
 
 				if (rtime == old_time)
 				{
@@ -1336,10 +1935,10 @@ bool spu_thread::process_mfc_cmd()
 					// TODO: vm::check_addr
 					vm::writer_lock lock(addr);
 
-					if (rdata == data)
+					if (cmp_rdata(rdata, data))
 					{
-						mov_rdata(data.data(), to_write.data());
-						res.release(old_time + 2);
+						mov_rdata(data, to_write);
+						res.release(old_time + 128);
 						result = 1;
 					}
 					else
@@ -1364,7 +1963,7 @@ bool spu_thread::process_mfc_cmd()
 			if (raddr)
 			{
 				// Last check for event before we clear the reservation
-				if (raddr == addr || rtime != (vm::reservation_acquire(raddr, 128) & ~1ull) || rdata != vm::_ref<decltype(rdata)>(raddr))
+				if (raddr == addr || rtime != (vm::reservation_acquire(raddr, 128) & -128) || !cmp_rdata(rdata, vm::_ref<decltype(rdata)>(raddr)))
 				{
 					ch_event_stat |= SPU_EVENT_LR;
 				}
@@ -1516,7 +2115,7 @@ u32 spu_thread::get_events(bool waiting)
 	}
 
 	// Check reservation status and set SPU_EVENT_LR if lost
-	if (raddr && ((vm::reservation_acquire(raddr, sizeof(rdata)) & ~1ull) != rtime || rdata != vm::_ref<decltype(rdata)>(raddr)))
+	if (raddr && ((vm::reservation_acquire(raddr, sizeof(rdata)) & -128) != rtime || !cmp_rdata(rdata, vm::_ref<decltype(rdata)>(raddr))))
 	{
 		ch_event_stat |= SPU_EVENT_LR;
 		raddr = 0;
@@ -1608,12 +2207,17 @@ s64 spu_thread::get_ch_value(u32 ch)
 
 	auto read_channel = [&](spu_channel& channel) -> s64
 	{
+		if (channel.get_count() == 0)
+		{
+			state += cpu_flag::wait;
+		}
+
 		for (int i = 0; i < 10 && channel.get_count() == 0; i++)
 		{
 			busy_wait();
 		}
 
-		u32 out;
+		u32 out = 0;
 
 		while (!channel.try_pop(out))
 		{
@@ -1625,6 +2229,7 @@ s64 spu_thread::get_ch_value(u32 ch)
 			thread_ctrl::wait();
 		}
 
+		check_state();
 		return out;
 	};
 
@@ -1636,6 +2241,11 @@ s64 spu_thread::get_ch_value(u32 ch)
 	}
 	case SPU_RdInMbox:
 	{
+		if (ch_in_mbox.get_count() == 0)
+		{
+			state += cpu_flag::wait;
+		}
+
 		while (true)
 		{
 			for (int i = 0; i < 10 && ch_in_mbox.get_count() == 0; i++)
@@ -1643,7 +2253,7 @@ s64 spu_thread::get_ch_value(u32 ch)
 				busy_wait();
 			}
 
-			u32 out;
+			u32 out = 0;
 
 			if (const uint old_count = ch_in_mbox.try_pop(out))
 			{
@@ -1652,6 +2262,7 @@ s64 spu_thread::get_ch_value(u32 ch)
 					int_ctrl[2].set(SPU_INT2_STAT_SPU_MAILBOX_THRESHOLD_INT);
 				}
 
+				check_state();
 				return out;
 			}
 
@@ -1724,7 +2335,10 @@ s64 spu_thread::get_ch_value(u32 ch)
 
 		//Polling: We might as well hint to the scheduler to slot in another thread since this one is counting down
 		if (g_cfg.core.spu_loop_detection && out > spu::scheduler::native_jiffy_duration_us)
+		{
+			state += cpu_flag::wait;
 			std::this_thread::yield();
+		}
 
 		return out;
 	}
@@ -1753,10 +2367,17 @@ s64 spu_thread::get_ch_value(u32 ch)
 				fmt::throw_exception("Not supported: event mask 0x%x" HERE, mask1);
 			}
 
-			const auto pseudo_lock = vm::reservation_notifier(raddr, 128).lock_one();
+			const auto pseudo_lock = vm::reservation_notifier(raddr, 128).try_shared_lock();
+
+			if (!pseudo_lock)
+			{
+				fmt::throw_exception("Unexpected: reservation notifier lock failed");
+			}
 
 			while (res = get_events(), !res)
 			{
+				state += cpu_flag::wait;
+
 				if (is_stopped())
 				{
 					return -1;
@@ -1765,11 +2386,14 @@ s64 spu_thread::get_ch_value(u32 ch)
 				pseudo_lock.wait(100);
 			}
 
+			check_state();
 			return res;
 		}
 
 		while (res = get_events(true), !res)
 		{
+			state += cpu_flag::wait;
+
 			if (is_stopped())
 			{
 				return -1;
@@ -1778,6 +2402,7 @@ s64 spu_thread::get_ch_value(u32 ch)
 			thread_ctrl::wait_for(100);
 		}
 
+		check_state();
 		return res;
 	}
 
@@ -1810,6 +2435,8 @@ bool spu_thread::set_ch_value(u32 ch, u32 value)
 		{
 			while (!ch_out_intr_mbox.try_push(value))
 			{
+				state += cpu_flag::wait;
+
 				if (is_stopped())
 				{
 					return false;
@@ -1819,8 +2446,11 @@ bool spu_thread::set_ch_value(u32 ch, u32 value)
 			}
 
 			int_ctrl[2].set(SPU_INT2_STAT_MAILBOX_INT);
+			check_state();
 			return true;
 		}
+
+		state += cpu_flag::wait;
 
 		const u32 code = value >> 24;
 		{
@@ -1829,7 +2459,7 @@ bool spu_thread::set_ch_value(u32 ch, u32 value)
 				/* ===== sys_spu_thread_send_event (used by spu_printf) ===== */
 
 				u32 spup = code & 63;
-				u32 data;
+				u32 data = 0;
 
 				if (!ch_out_mbox.try_pop(data))
 				{
@@ -1866,7 +2496,7 @@ bool spu_thread::set_ch_value(u32 ch, u32 value)
 				/* ===== sys_spu_thread_throw_event ===== */
 
 				u32 spup = code & 63;
-				u32 data;
+				u32 data = 0;
 
 				if (!ch_out_mbox.try_pop(data))
 				{
@@ -1896,7 +2526,7 @@ bool spu_thread::set_ch_value(u32 ch, u32 value)
 				/* ===== sys_event_flag_set_bit ===== */
 
 				u32 flag = value & 0xffffff;
-				u32 data;
+				u32 data = 0;
 
 				if (!ch_out_mbox.try_pop(data))
 				{
@@ -1925,7 +2555,7 @@ bool spu_thread::set_ch_value(u32 ch, u32 value)
 				/* ===== sys_event_flag_set_bit_impatient ===== */
 
 				u32 flag = value & 0xffffff;
-				u32 data;
+				u32 data = 0;
 
 				if (!ch_out_mbox.try_pop(data))
 				{
@@ -1956,6 +2586,8 @@ bool spu_thread::set_ch_value(u32 ch, u32 value)
 	{
 		while (!ch_out_mbox.try_push(value))
 		{
+			state += cpu_flag::wait;
+
 			if (is_stopped())
 			{
 				return false;
@@ -1964,6 +2596,7 @@ bool spu_thread::set_ch_value(u32 ch, u32 value)
 			thread_ctrl::wait();
 		}
 
+		check_state();
 		return true;
 	}
 
@@ -2117,6 +2750,7 @@ bool spu_thread::stop_and_signal(u32 code)
 
 	if (offset >= RAW_SPU_BASE_ADDR)
 	{
+		state += cpu_flag::wait;
 		status.atomic_op([code](u32& status)
 		{
 			status = (status & 0xffff) | (code << 16);
@@ -2126,6 +2760,7 @@ bool spu_thread::stop_and_signal(u32 code)
 
 		int_ctrl[2].set(SPU_INT2_STAT_SPU_STOP_AND_SIGNAL_INT);
 		state += cpu_flag::stop;
+		check_state();
 		return true;
 	}
 
@@ -2155,6 +2790,8 @@ bool spu_thread::stop_and_signal(u32 code)
 		// HACK: wait for executable code
 		while (!_ref<u32>(pc))
 		{
+			state += cpu_flag::wait;
+
 			if (is_stopped())
 			{
 				return false;
@@ -2163,12 +2800,15 @@ bool spu_thread::stop_and_signal(u32 code)
 			thread_ctrl::wait_for(1000);
 		}
 
+		check_state();
 		return false;
 	}
 
 	case 0x001:
 	{
+		state += cpu_flag::wait;
 		thread_ctrl::wait_for(1000); // hack
+		check_state();
 		return true;
 	}
 
@@ -2182,7 +2822,7 @@ bool spu_thread::stop_and_signal(u32 code)
 	{
 		/* ===== sys_spu_thread_receive_event ===== */
 
-		u32 spuq;
+		u32 spuq = 0;
 
 		if (!ch_out_mbox.try_pop(spuq))
 		{
@@ -2203,6 +2843,8 @@ bool spu_thread::stop_and_signal(u32 code)
 		}
 
 		std::shared_ptr<lv2_event_queue> queue;
+
+		state += cpu_flag::wait;
 
 		while (true)
 		{
@@ -2244,6 +2886,7 @@ bool spu_thread::stop_and_signal(u32 code)
 
 			if (!queue)
 			{
+				check_state();
 				return ch_in_mbox.set_values(1, CELL_EINVAL), true; // TODO: check error value
 			}
 
@@ -2274,6 +2917,7 @@ bool spu_thread::stop_and_signal(u32 code)
 				const auto data3 = static_cast<u32>(std::get<3>(event));
 				ch_in_mbox.set_values(4, CELL_OK, data1, data2, data3);
 				queue->events.pop_front();
+				check_state();
 				return true;
 			}
 		}
@@ -2319,6 +2963,7 @@ bool spu_thread::stop_and_signal(u32 code)
 			}
 		}
 
+		check_state();
 		return true;
 	}
 
@@ -2326,7 +2971,7 @@ bool spu_thread::stop_and_signal(u32 code)
 	{
 		/* ===== sys_spu_thread_tryreceive_event ===== */
 
-		u32 spuq;
+		u32 spuq = 0;
 
 		if (!ch_out_mbox.try_pop(spuq))
 		{
@@ -2392,7 +3037,9 @@ bool spu_thread::stop_and_signal(u32 code)
 	{
 		/* ===== sys_spu_thread_group_exit ===== */
 
-		u32 value;
+		state += cpu_flag::wait;
+
+		u32 value = 0;
 
 		if (!ch_out_mbox.try_pop(value))
 		{
@@ -2416,12 +3063,15 @@ bool spu_thread::stop_and_signal(u32 code)
 		group->join_state = SYS_SPU_THREAD_GROUP_JOIN_GROUP_EXIT;
 
 		state += cpu_flag::stop;
+		check_state();
 		return true;
 	}
 
 	case 0x102:
 	{
 		/* ===== sys_spu_thread_exit ===== */
+
+		state += cpu_flag::wait;
 
 		if (!ch_out_mbox.get_count())
 		{
@@ -2431,6 +3081,7 @@ bool spu_thread::stop_and_signal(u32 code)
 		LOG_TRACE(SPU, "sys_spu_thread_exit(status=0x%x)", ch_out_mbox.get_value());
 		status |= SPU_STATUS_STOPPED_BY_STOP;
 		state += cpu_flag::stop;
+		check_state();
 		return true;
 	}
 	}

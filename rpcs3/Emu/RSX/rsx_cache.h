@@ -83,8 +83,8 @@ namespace rsx
 
 	public:
 
-		buffered_section() {};
-		~buffered_section() {};
+		buffered_section() = default;
+		~buffered_section() = default;
 
 		void reset(const address_range &memory_range)
 		{
@@ -489,7 +489,7 @@ namespace rsx
 			}
 
 			virtual void refresh()
-			{};
+			{}
 
 			virtual void close()
 			{
@@ -501,8 +501,8 @@ namespace rsx
 		};
 
 		shaders_cache(backend_storage& storage, std::string pipeline_class, std::string version_prefix_str = "v1")
-			: version_prefix(version_prefix_str)
-			, pipeline_class_name(pipeline_class)
+			: version_prefix(std::move(version_prefix_str))
+			, pipeline_class_name(std::move(pipeline_class))
 			, m_storage(storage)
 		{
 			if (!g_cfg.video.disable_on_disk_shader_cache)
@@ -571,7 +571,7 @@ namespace rsx
 
 			// Preload everything needed to compile the shaders
 			// Can probably be parallelized too, but since it's mostly reading files it's probably not worth it
-			std::vector<std::tuple<pipeline_storage_type, RSXVertexProgram, RSXFragmentProgram>> unpackeds;
+			std::vector<std::tuple<pipeline_storage_type, RSXVertexProgram, RSXFragmentProgram>> unpacked;
 			std::chrono::time_point<steady_clock> last_update;
 			u32 processed_since_last_update = 0;
 
@@ -590,9 +590,9 @@ namespace rsx
 				}
 				f.read<u8>(bytes, f.size());
 
-				auto unpacked = unpack(*(pipeline_data*)bytes.data());
-				m_storage.preload_programs(std::get<1>(unpacked), std::get<2>(unpacked));
-				unpackeds.push_back(unpacked);
+				auto entry = unpack(*(pipeline_data*)bytes.data());
+				m_storage.preload_programs(std::get<1>(entry), std::get<2>(entry));
+				unpacked.push_back(entry);
 
 				// Only update the screen at about 10fps since updating it everytime slows down the process
 				std::chrono::time_point<steady_clock> now = std::chrono::steady_clock::now();
@@ -606,14 +606,17 @@ namespace rsx
 				}
 			}
 
+			// Account for any invalid entries
+			entry_count = u32(unpacked.size());
+
 			atomic_t<u32> processed(0);
 			std::function<void(u32)> shader_comp_worker = [&](u32 index)
 			{
 				u32 pos;
 				while (((pos = processed++) < entry_count) && !Emu.IsStopped())
 				{
-					auto unpacked = unpackeds[pos];
-					m_storage.add_pipeline_entry(std::get<1>(unpacked), std::get<2>(unpacked), std::get<0>(unpacked), std::forward<Args>(args)...);
+					auto& entry = unpacked[pos];
+					m_storage.add_pipeline_entry(std::get<1>(entry), std::get<2>(entry), std::get<0>(entry), std::forward<Args>(args)...);
 				}
 			};
 
@@ -653,8 +656,8 @@ namespace rsx
 				u32 pos;
 				while (((pos = processed++) < entry_count) && !Emu.IsStopped())
 				{
-					auto unpacked = unpackeds[pos];
-					m_storage.add_pipeline_entry(std::get<1>(unpacked), std::get<2>(unpacked), std::get<0>(unpacked), std::forward<Args>(args)...);
+					auto& entry = unpacked[pos];
+					m_storage.add_pipeline_entry(std::get<1>(entry), std::get<2>(entry), std::get<0>(entry), std::forward<Args>(args)...);
 
 					// Update screen at about 10fps
 					std::chrono::time_point<steady_clock> now = std::chrono::steady_clock::now();
@@ -863,7 +866,7 @@ namespace rsx
 		class default_vertex_cache
 		{
 		public:
-			virtual ~default_vertex_cache() {};
+			virtual ~default_vertex_cache() = default;
 			virtual storage_type* find_vertex_range(uintptr_t /*local_addr*/, upload_format, u32 /*data_length*/) { return nullptr; }
 			virtual void store_range(uintptr_t /*local_addr*/, upload_format, u32 /*data_length*/, u32 /*offset_in_heap*/) {}
 			virtual void purge() {}

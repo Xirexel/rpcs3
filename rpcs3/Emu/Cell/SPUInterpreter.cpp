@@ -6,6 +6,7 @@
 #include "Utilities/asm.h"
 #include "SPUThread.h"
 #include "SPUInterpreter.h"
+#include "Emu/Cell/Common.h"
 
 #include <cmath>
 #include <cfenv>
@@ -166,6 +167,13 @@ bool spu_interpreter::RDCH(spu_thread& spu, spu_opcode_t op)
 	}
 
 	spu.gpr[op.rt] = v128::from32r(static_cast<u32>(result));
+
+	if (spu.state)
+	{
+		spu.pc += 4;
+		return false;
+	}
+
 	return true;
 }
 
@@ -413,7 +421,18 @@ bool spu_interpreter::MTSPR(spu_thread& spu, spu_opcode_t op)
 
 bool spu_interpreter::WRCH(spu_thread& spu, spu_opcode_t op)
 {
-	return spu.set_ch_value(op.ra, spu.gpr[op.rt]._u32[3]);
+	if (!spu.set_ch_value(op.ra, spu.gpr[op.rt]._u32[3]))
+	{
+		return false;
+	}
+
+	if (spu.state)
+	{
+		spu.pc += 4;
+		return false;
+	}
+
+	return true;
 }
 
 bool spu_interpreter::BIZ(spu_thread& spu, spu_opcode_t op)
@@ -496,7 +515,16 @@ bool spu_interpreter::IRET(spu_thread& spu, spu_opcode_t op)
 
 bool spu_interpreter::BISLED(spu_thread& spu, spu_opcode_t op)
 {
-	fmt::throw_exception("Unimplemented instruction" HERE);
+	const u32 target = spu_branch_target(spu.gpr[op.ra]._u32[3]);
+	spu.gpr[op.rt] = v128::from32r(spu_branch_target(spu.pc + 4));
+
+	if (spu.get_events())
+	{
+		spu.pc = target;
+		set_interrupt_status(spu, op);
+		return false;
+	}
+
 	return true;
 }
 
@@ -990,8 +1018,8 @@ bool spu_interpreter_fast::FM(spu_thread& spu, spu_opcode_t op)
 
 	//check for extended
 	const auto nan_check = _mm_cmpeq_ps(_mm_and_ps(primary_result, all_exp_bits), all_exp_bits);
-	const auto sign_mask = _mm_xor_ps(_mm_and_ps((__m128&)sign_bits, spu.gpr[op.ra].vf), _mm_and_ps((__m128&)sign_bits, spu.gpr[op.rb].vf));
-	const auto extended_result = _mm_or_ps(sign_mask, _mm_andnot_ps((__m128&)sign_bits, primary_result));
+	const auto sign_mask = _mm_xor_ps(_mm_and_ps(sign_bits, spu.gpr[op.ra].vf), _mm_and_ps(sign_bits, spu.gpr[op.rb].vf));
+	const auto extended_result = _mm_or_ps(sign_mask, _mm_andnot_ps(sign_bits, primary_result));
 	const auto final_extended = _mm_andnot_ps(denorm_operand_mask, extended_result);
 
 	//if nan, result = ext, else result = flushed
@@ -1043,10 +1071,7 @@ bool spu_interpreter_fast::FCMGT(spu_thread& spu, spu_opcode_t op)
 
 bool spu_interpreter::DFCMGT(spu_thread& spu, spu_opcode_t op)
 {
-	const auto mask = _mm_castsi128_pd(_mm_set1_epi64x(0x7fffffffffffffff));
-	const auto ra = _mm_and_pd(spu.gpr[op.ra].vd, mask);
-	const auto rb = _mm_and_pd(spu.gpr[op.rb].vd, mask);
-	spu.gpr[op.rt].vd = _mm_cmpgt_pd(ra, rb);
+	fmt::throw_exception("Unexpected Instruction" HERE);
 	return true;
 }
 
@@ -1510,13 +1535,13 @@ bool spu_interpreter::AHI(spu_thread& spu, spu_opcode_t op)
 
 bool spu_interpreter::STQD(spu_thread& spu, spu_opcode_t op)
 {
-	spu._ref<v128>((spu.gpr[op.ra]._s32[3] + (op.si10 << 4)) & 0x3fff0) = spu.gpr[op.rt];
+	spu._ref<v128>((spu.gpr[op.ra]._s32[3] + (op.si10 * 16)) & 0x3fff0) = spu.gpr[op.rt];
 	return true;
 }
 
 bool spu_interpreter::LQD(spu_thread& spu, spu_opcode_t op)
 {
-	spu.gpr[op.rt] = spu._ref<v128>((spu.gpr[op.ra]._s32[3] + (op.si10 << 4)) & 0x3fff0);
+	spu.gpr[op.rt] = spu._ref<v128>((spu.gpr[op.ra]._s32[3] + (op.si10 * 16)) & 0x3fff0);
 	return true;
 }
 
@@ -1762,7 +1787,7 @@ bool spu_interpreter::MPYA(spu_thread& spu, spu_opcode_t op)
 bool spu_interpreter_fast::FNMS(spu_thread& spu, spu_opcode_t op)
 {
 	const u32 test_bits = 0x7f800000;
-	auto mask = _mm_set1_ps((f32&)test_bits);
+	auto mask = _mm_set1_ps(std::bit_cast<f32>(test_bits));
 
 	auto test_a = _mm_and_ps(spu.gpr[op.ra].vf, mask);
 	auto mask_a = _mm_cmpneq_ps(test_a, mask);
@@ -1779,7 +1804,7 @@ bool spu_interpreter_fast::FNMS(spu_thread& spu, spu_opcode_t op)
 bool spu_interpreter_fast::FMA(spu_thread& spu, spu_opcode_t op)
 {
 	const u32 test_bits = 0x7f800000;
-	auto mask = _mm_set1_ps((f32&)test_bits);
+	auto mask = _mm_set1_ps(std::bit_cast<f32>(test_bits));
 
 	auto test_a = _mm_and_ps(spu.gpr[op.ra].vf, mask);
 	auto mask_a = _mm_cmpneq_ps(test_a, mask);
@@ -1796,7 +1821,7 @@ bool spu_interpreter_fast::FMA(spu_thread& spu, spu_opcode_t op)
 bool spu_interpreter_fast::FMS(spu_thread& spu, spu_opcode_t op)
 {
 	const u32 test_bits = 0x7f800000;
-	auto mask = _mm_set1_ps((f32&)test_bits);
+	auto mask = _mm_set1_ps(std::bit_cast<f32>(test_bits));
 
 	auto test_a = _mm_and_ps(spu.gpr[op.ra].vf, mask);
 	auto mask_a = _mm_cmpneq_ps(test_a, mask);
@@ -1831,20 +1856,20 @@ static void SetHostRoundingMode(u32 rn)
 
 // Floating-point utility constants and functions
 static const u32 FLOAT_MAX_NORMAL_I = 0x7F7FFFFF;
-static const float& FLOAT_MAX_NORMAL = (float&)FLOAT_MAX_NORMAL_I;
+static const f32 FLOAT_MAX_NORMAL = std::bit_cast<f32>(FLOAT_MAX_NORMAL_I);
 static const u32 FLOAT_NAN_I = 0x7FC00000;
-static const float& FLOAT_NAN = (float&)FLOAT_NAN_I;
+static const f32 FLOAT_NAN = std::bit_cast<f32>(FLOAT_NAN_I);
 static const u64 DOUBLE_NAN_I = 0x7FF8000000000000ULL;
-static const double DOUBLE_NAN = (double&)DOUBLE_NAN_I;
+static const f64 DOUBLE_NAN = std::bit_cast<f64>(DOUBLE_NAN_I);
 
 inline bool issnan(double x)
 {
-	return std::isnan(x) && ((s64&)x) << 12 > 0;
+	return std::isnan(x) && (std::bit_cast<s64>(x)) << 12 > 0;
 }
 
 inline bool issnan(float x)
 {
-	return std::isnan(x) && ((s32&)x) << 9 > 0;
+	return std::isnan(x) && (std::bit_cast<s32>(x)) << 9 > 0;
 }
 
 inline bool isextended(float x)
@@ -1855,14 +1880,14 @@ inline bool isextended(float x)
 inline float extended(bool sign, u32 mantissa) // returns -1^sign * 2^127 * (1.mantissa)
 {
 	u32 bits = sign << 31 | 0x7F800000 | mantissa;
-	return (float&)bits;
+	return std::bit_cast<f32>(bits);
 }
 
 inline float ldexpf_extended(float x, int exp)  // ldexpf() for extended values, assumes result is in range
 {
-	u32 bits = (u32&)x;
+	u32 bits = std::bit_cast<u32>(x);
 	if (bits << 1 != 0) bits += exp * 0x00800000;
-	return (float&)bits;
+	return std::bit_cast<f32>(bits);
 }
 
 inline bool isdenormal(float x)
@@ -1972,8 +1997,8 @@ static void FA_FS(spu_thread& spu, spu_opcode_t op, bool sub)
 			{
 				if (std::signbit(a) != std::signbit(b))
 				{
-					const u32 bits = (u32&)a - 1;
-					result = (float&)bits;
+					const u32 bits = std::bit_cast<u32>(a) - 1;
+					result = std::bit_cast<f32>(bits);
 				}
 				else
 
@@ -1983,8 +2008,8 @@ static void FA_FS(spu_thread& spu, spu_opcode_t op, bool sub)
 			{
 				if (std::signbit(a) != std::signbit(b))
 				{
-					const u32 bits = (u32&)b - 1;
-					result = (float&)bits;
+					const u32 bits = std::bit_cast<u32>(b) - 1;
+					result = std::bit_cast<f32>(bits);
 				}
 				else
 					result = b;
@@ -2514,8 +2539,8 @@ static void FMA(spu_thread& spu, spu_opcode_t op, bool neg, bool sub)
 					result = new_a * new_b;
 					if (c != 0.0f && std::signbit(c) != sign)
 					{
-						u32 bits = (u32&)result - 1;
-						result = (float&)bits;
+						u32 bits = std::bit_cast<u32>(result) - 1;
+						result = std::bit_cast<f32>(bits);
 					}
 				}
 				else
@@ -2545,8 +2570,8 @@ static void FMA(spu_thread& spu, spu_opcode_t op, bool neg, bool sub)
 				result = c;
 				if (sign != std::signbit(c))
 				{
-					u32 bits = (u32&)result - 1;
-					result = (float&)bits;
+					u32 bits = std::bit_cast<u32>(result) - 1;
+					result = std::bit_cast<f32>(bits);
 				}
 			}
 			else

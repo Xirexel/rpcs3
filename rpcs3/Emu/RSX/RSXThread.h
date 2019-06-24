@@ -208,7 +208,7 @@ namespace rsx
 			}
 
 			const u32 max_index = (first + count) - 1;
-			u32 _max_index = first;
+			u32 _max_index = 0;
 			u32 _min_index = first;
 
 			for (const auto &attrib : locations)
@@ -242,6 +242,7 @@ namespace rsx
 				}
 			}
 
+			verify(HERE), _max_index >= _min_index;
 			return { _min_index, (_max_index - _min_index) + 1 };
 		}
 	};
@@ -268,9 +269,9 @@ namespace rsx
 
 		void clear()
 		{
-			interleaved_blocks.resize(0);
-			volatile_blocks.resize(0);
-			referenced_registers.resize(0);
+			interleaved_blocks.clear();
+			volatile_blocks.clear();
+			referenced_registers.clear();
 		}
 
 		bool validate() const
@@ -393,11 +394,11 @@ namespace rsx
 			std::vector<queued_report_write> m_pending_writes;
 			std::unordered_map<u32, u32> m_statistics_map;
 
-			ZCULL_control() {}
-			~ZCULL_control() {}
+			ZCULL_control() = default;
+			~ZCULL_control() = default;
 
-			void set_enabled(class ::rsx::thread* ptimer, bool enabled);
-			void set_active(class ::rsx::thread* ptimer, bool active);
+			void set_enabled(class ::rsx::thread* ptimer, bool state);
+			void set_active(class ::rsx::thread* ptimer, bool state);
 
 			void write(vm::addr_t sink, u32 timestamp, u32 type, u32 value);
 
@@ -423,7 +424,7 @@ namespace rsx
 			void on_draw();
 
 			// Check for pending writes
-			bool has_pending() const { return (m_pending_writes.size() != 0); }
+			bool has_pending() const { return !m_pending_writes.empty(); }
 
 			// Backend methods (optional, will return everything as always visible by default)
 			virtual void begin_occlusion_query(occlusion_query_info* /*query*/) {}
@@ -565,7 +566,7 @@ namespace rsx
 		 * returns whether surface is a render target and surface pitch in native format
 		 */
 		void get_current_fragment_program(const std::array<std::unique_ptr<rsx::sampled_image_descriptor_base>, rsx::limits::fragment_textures_count>& sampler_descriptors);
-		void get_current_fragment_program_legacy(std::function<std::tuple<bool, u16>(u32, fragment_texture&, bool)> get_surface_info);
+		void get_current_fragment_program_legacy(const std::function<std::tuple<bool, u16>(u32, fragment_texture&, bool)>& get_surface_info);
 
 	public:
 		double fps_limit = 59.94;
@@ -623,7 +624,7 @@ namespace rsx
 		virtual void on_init_rsx() = 0;
 		virtual void on_init_thread() = 0;
 		virtual bool do_method(u32 /*cmd*/, u32 /*value*/) { return false; }
-		virtual void flip(int buffer) = 0;
+		virtual void flip(int buffer, bool emu_flip = false) = 0;
 		virtual u64 timestamp();
 		virtual bool on_access_violation(u32 /*address*/, bool /*is_writing*/) { return false; }
 		virtual void on_invalidate_memory_range(const address_range & /*range*/) {}
@@ -644,7 +645,7 @@ namespace rsx
 		gsl::span<const gsl::byte> get_raw_vertex_buffer(const rsx::data_array_format_info&, u32 base_offset, const draw_clause& draw_array_clause) const;
 
 		std::vector<std::variant<vertex_array_buffer, vertex_array_register, empty_vertex_array>>
-		get_vertex_buffers(const rsx::rsx_state& state, const u64 consumed_attrib_mask) const;
+		get_vertex_buffers(const rsx::rsx_state& state, u64 consumed_attrib_mask) const;
 
 		std::variant<draw_array_command, draw_indexed_array_command, draw_inlined_array>
 		get_draw_command(const rsx::rsx_state& state) const;
@@ -687,7 +688,7 @@ namespace rsx
 			std::function<bool()> callback;
 			//std::promise<void> promise;
 
-			internal_task_entry(std::function<bool()> callback) : callback(callback)
+			internal_task_entry(std::function<bool()> callback) : callback(std::move(callback))
 			{
 			}
 		};
@@ -760,8 +761,8 @@ namespace rsx
 		 * TODO: It's more efficient to combine multiple call of this function into one.
 		 */
 		virtual std::array<std::vector<gsl::byte>, 4> copy_render_targets_to_memory() {
-			return  std::array<std::vector<gsl::byte>, 4>();
-		};
+			return std::array<std::vector<gsl::byte>, 4>();
+		}
 
 		/**
 		* Copy depth and stencil content to buffers.
@@ -769,11 +770,11 @@ namespace rsx
 		*/
 		virtual std::array<std::vector<gsl::byte>, 2> copy_depth_stencil_buffer_to_memory() {
 			return std::array<std::vector<gsl::byte>, 2>();
-		};
+		}
 
-		virtual std::pair<std::string, std::string> get_programs() const { return std::make_pair("", ""); };
+		virtual std::pair<std::string, std::string> get_programs() const { return std::make_pair("", ""); }
 
-		virtual bool scaled_image_from_memory(blit_src_info& /*src_info*/, blit_dst_info& /*dst_info*/, bool /*interpolate*/){ return false;  }
+		virtual bool scaled_image_from_memory(blit_src_info& /*src_info*/, blit_dst_info& /*dst_info*/, bool /*interpolate*/) { return false; }
 
 	public:
 		void reset();

@@ -2,9 +2,10 @@
 
 #include "Emu/Io/PadHandler.h"
 #include "Utilities/Thread.h"
-#include <libusb.h>
 #include <limits>
 #include <unordered_map>
+
+#include "hidapi.h"
 
 class ds3_pad_handler final : public PadHandlerBase
 {
@@ -102,8 +103,8 @@ class ds3_pad_handler final : public PadHandlerBase
 
 	struct ds3_device
 	{
-		libusb_device *device;
-		libusb_device_handle *handle;
+		std::string device = {};
+		hid_device *handle = nullptr;
 		pad_config* config{ nullptr };
 		u8 buf[64];
 		u8 large_motor = 0;
@@ -113,6 +114,12 @@ class ds3_pad_handler final : public PadHandlerBase
 
 	const u16 DS3_VID = 0x054C;
 	const u16 DS3_PID = 0x0268;
+
+#ifdef _WIN32
+	const u8 DS3_HID_OFFSET = 0x01;
+#else
+	const u8 DS3_HID_OFFSET = 0x00;
+#endif
 
 	// pseudo 'controller id' to keep track of unique controllers
 	std::vector<std::shared_ptr<ds3_device>> controllers;
@@ -127,7 +134,7 @@ public:
 	bool bindPadToDevice(std::shared_ptr<Pad> pad, const std::string& device) override;
 	void ThreadProc() override;
 	void GetNextButtonPress(const std::string& padId, const std::function<void(u16, std::string, std::string, int[])>& buttonCallback, const std::function<void(std::string)>& fail_callback, bool get_blacklist = false, const std::vector<std::string>& buttons = {}) override;
-	void TestVibration(const std::string& padId, u32 largeMotor, u32 smallMotor) override;
+	void SetPadData(const std::string& padId, u32 largeMotor, u32 smallMotor, s32 r, s32 g, s32 b) override;
 	void init_config(pad_config* cfg, const std::string& name) override;
 
 private:
@@ -136,6 +143,9 @@ private:
 	void process_data(const std::shared_ptr<ds3_device>& ds3dev, const std::shared_ptr<Pad>& pad);
 	std::array<std::pair<u16, bool>, ds3_pad_handler::DS3KeyCodes::KeyCodeCount> get_button_values(const std::shared_ptr<ds3_device>& device);
 	void send_output_report(const std::shared_ptr<ds3_device>& ds3dev);
+
+private:
+	bool init_usb();
 
 private:
 	bool is_init = false;

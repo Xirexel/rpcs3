@@ -357,6 +357,11 @@ s32 sys_net_bnet_accept(ppu_thread& ppu, s32 s, vm::ptr<sys_net_sockaddr> addr, 
 		}
 	}
 
+	if (ppu.is_stopped())
+	{
+		return 0;
+	}
+
 	auto newsock = std::make_shared<lv2_socket>(native_socket);
 
 	result = idm::import_existing<lv2_socket>(newsock);
@@ -975,6 +980,11 @@ s32 sys_net_bnet_recvfrom(ppu_thread& ppu, s32 s, vm::ptr<void> buf, u32 len, s3
 		}
 	}
 
+	if (ppu.is_stopped())
+	{
+		return 0;
+	}
+
 	// TODO
 	if (addr)
 	{
@@ -1426,7 +1436,7 @@ s32 sys_net_bnet_close(ppu_thread& ppu, s32 s)
 	}
 
 	if (!sock->queue.empty())
-		sys_net.fatal("CLOSE");
+		sys_net.error("CLOSE");
 
 	return 0;
 }
@@ -1794,6 +1804,11 @@ s32 sys_net_bnet_select(ppu_thread& ppu, s32 nfds, vm::ptr<sys_net_fd_set> readf
 		{
 			thread_ctrl::wait();
 		}
+	}
+
+	if (ppu.is_stopped())
+	{
+		return 0;
 	}
 
 	if (readfds)

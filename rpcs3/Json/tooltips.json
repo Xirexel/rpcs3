@@ -45,7 +45,6 @@
 	"debug": {
 		"ppuDebug": "Never use this.",
 		"spuDebug": "Never use this.",
-		"spuVerification": "Never disable this.",
 		"setDAZandFTZ": "Never use this.",
 		"accurateGETLLAR": "Never use this.",
 		"accuratePUTLLUC": "Never use this.",
@@ -65,7 +64,8 @@
 		"disableVulkanMemAllocator": "Disables the custom Vulkan memory allocator and reverts to direct calls to VkAllocateMemory/VkFreeMemory.",
 		"disableFIFOReordering": "Disables RSX FIFO optimizations completely. Draws are processed as they are received by the DMA puller.",
 		"gpuTextureScaling": "Force all texture transfer, scaling and conversion operations on the GPU.\nMay cause texture corruption in some cases.",
-		"strictTextureFlushing": "Forces texture flushing even in situations where it is not necessary/correct. Known to cause visual artifacts, but useful for debugging certain texture cache issues."
+		"strictTextureFlushing": "Forces texture flushing even in situations where it is not necessary/correct. Known to cause visual artifacts, but useful for debugging certain texture cache issues.",
+		"maxSPURSThreads": "Limits the maximum number of SPURS threads in each thread group.\nMay improve performance in some cases, especially on systems with limited number of hardware threads.\nLimiting the number of threads is likely to cause crashes; it's recommended to keep this at default value."
 	},
 	"emulator": {
 		"misc": {
@@ -107,6 +107,7 @@
 			"graphicsAdapterBox_Linux": "On multi GPU systems select which GPU to use in RPCS3 when using Vulkan.\nThis is not needed when using OpenGL.",
 			"aspectBox": "Leave this on 16:9 unless you have a 4:3 monitor.\nAuto also works well, especially if you use a resolution that is not 720p.",
 			"frameLimitBox": "Off is the best option as it performs faster.\nUsing the frame limiter will add extra overhead and slow down the game.\nHowever, some games will crash if the frame rate is too high.\nIf that happens, set value to anything other than Off.",
+			"antiAliasing": "Emulate PS3 multisampling layout.\nCan fix some otherwise difficult to solve graphics glitches.\nLow to moderate performance hit depending on your GPU hardware.",
 			"anisotropicFilterOverride": "Higher values increase sharpness of textures on sloped surfaces at the cost of GPU resources.\nModern GPUs can handle this setting just fine even at 16x.\nKeep this on Automatic if you want to use the original setting used by a real PS3."
 		},
 		"sliders": {

@@ -1,4 +1,6 @@
-﻿#include "OpenGL.h"
+﻿#pragma once
+
+#include "OpenGL.h"
 #include "../GCM.h"
 #include "../Common/TextureUtils.h"
 #include "GLHelpers.h"
@@ -12,7 +14,7 @@ namespace rsx
 namespace gl
 {
 	GLenum get_target(rsx::texture_dimension_extended type);
-	GLenum get_sized_internal_format(u32 gcm_format);
+	GLenum get_sized_internal_format(u32 texture_format);
 	std::tuple<GLenum, GLenum> get_format_type(u32 texture_format);
 	std::tuple<GLenum, GLenum, bool> get_format_type(texture::internal_format format);
 	GLenum wrap_mode(rsx::texture_wrap_mode wrap);
@@ -21,6 +23,7 @@ namespace gl
 
 	viewable_image* create_texture(u32 gcm_format, u16 width, u16 height, u16 depth, u16 mipmaps, rsx::texture_dimension_extended type);
 
+	bool formats_are_bitcast_compatible(GLenum format1, GLenum format2);
 	void copy_typeless(texture* dst, const texture* src);
 	/**
 	 * is_swizzled - determines whether input bytes are in morton order

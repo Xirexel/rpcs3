@@ -10,7 +10,7 @@
 
 extern logs::channel sysPrxForUser;
 
-error_code sys_lwmutex_create(vm::ptr<sys_lwmutex_t> lwmutex, vm::ptr<sys_lwmutex_attribute_t> attr)
+error_code sys_lwmutex_create(ppu_thread& ppu, vm::ptr<sys_lwmutex_t> lwmutex, vm::ptr<sys_lwmutex_attribute_t> attr)
 {
 	sysPrxForUser.trace("sys_lwmutex_create(lwmutex=*0x%x, attr=*0x%x)", lwmutex, attr);
 
@@ -42,7 +42,7 @@ error_code sys_lwmutex_create(vm::ptr<sys_lwmutex_t> lwmutex, vm::ptr<sys_lwmute
 	attrs->flags     = 0;
 	attrs->name_u64  = attr->name_u64;
 
-	if (error_code res = g_cfg.core.hle_lwmutex ? sys_mutex_create(out_id, attrs) : _sys_lwmutex_create(out_id, protocol, lwmutex, 0x80000001, attr->name_u64))
+	if (error_code res = g_cfg.core.hle_lwmutex ? sys_mutex_create(ppu, out_id, attrs) : _sys_lwmutex_create(ppu, out_id, protocol, lwmutex, 0x80000001, attr->name_u64))
 	{
 		return res;
 	}
@@ -60,7 +60,7 @@ error_code sys_lwmutex_destroy(ppu_thread& ppu, vm::ptr<sys_lwmutex_t> lwmutex)
 
 	if (g_cfg.core.hle_lwmutex)
 	{
-		return sys_mutex_destroy(lwmutex->sleep_queue);
+		return sys_mutex_destroy(ppu, lwmutex->sleep_queue);
 	}
 
 	// check to prevent recursive locking in the next call
@@ -76,7 +76,7 @@ error_code sys_lwmutex_destroy(ppu_thread& ppu, vm::ptr<sys_lwmutex_t> lwmutex)
 	}
 
 	// call the syscall
-	if (error_code res = _sys_lwmutex_destroy(lwmutex->sleep_queue))
+	if (error_code res = _sys_lwmutex_destroy(ppu, lwmutex->sleep_queue))
 	{
 		// unlock the mutex if failed
 		sys_lwmutex_unlock(ppu, lwmutex);
@@ -167,6 +167,11 @@ error_code sys_lwmutex_lock(ppu_thread& ppu, vm::ptr<sys_lwmutex_t> lwmutex, u64
 	// lock using the syscall
 	const error_code res = _sys_lwmutex_lock(ppu, lwmutex->sleep_queue, timeout);
 
+	if (ppu.test_stopped())
+	{
+		return 0;
+	}
+
 	lwmutex->all_info--;
 
 	if (res == CELL_OK)
@@ -210,6 +215,11 @@ error_code sys_lwmutex_lock(ppu_thread& ppu, vm::ptr<sys_lwmutex_t> lwmutex, u64
 			const u64 time0 = timeout ? get_system_time() : 0;
 
 			const error_code res_ = _sys_lwmutex_lock(ppu, lwmutex->sleep_queue, timeout);
+
+			if (ppu.test_stopped())
+			{
+				return 0;
+			}
 
 			if (res_ == CELL_OK)
 			{
@@ -292,7 +302,7 @@ error_code sys_lwmutex_trylock(ppu_thread& ppu, vm::ptr<sys_lwmutex_t> lwmutex)
 	if (old_owner == lwmutex_reserved)
 	{
 		// should be locked by the syscall
-		const error_code res = _sys_lwmutex_trylock(lwmutex->sleep_queue);
+		const error_code res = _sys_lwmutex_trylock(ppu, lwmutex->sleep_queue);
 
 		if (res == CELL_OK)
 		{
@@ -349,7 +359,7 @@ error_code sys_lwmutex_unlock(ppu_thread& ppu, vm::ptr<sys_lwmutex_t> lwmutex)
 		lwmutex->vars.owner.release(lwmutex_free);
 
 		// Call the alternative syscall
-		if (_sys_lwmutex_unlock2(lwmutex->sleep_queue) == CELL_ESRCH)
+		if (_sys_lwmutex_unlock2(ppu, lwmutex->sleep_queue) == CELL_ESRCH)
 		{
 			return CELL_ESRCH;
 		}

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Source Files">
@@ -779,6 +779,33 @@
     <ClCompile Include="Emu\RSX\Overlays\overlay_osk.cpp">
       <Filter>Emu\GPU\RSX\Overlays</Filter>
     </ClCompile>
+    <ClCompile Include="Emu\Cell\lv2\sys_overlay.cpp">
+      <Filter>Emu\Cell\lv2</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\RSX\Overlays\overlay_save_dialog.cpp">
+      <Filter>Emu\GPU\RSX\Overlays</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\RSX\Overlays\overlay_message_dialog.cpp">
+      <Filter>Emu\GPU\RSX\Overlays</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\RSX\Overlays\overlay_shader_compile_notification.cpp">
+      <Filter>Emu\GPU\RSX\Overlays</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\RSX\Overlays\overlay_trophy_notification.cpp">
+      <Filter>Emu\GPU\RSX\Overlays</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\RSX\Overlays\overlay_font.cpp">
+      <Filter>Emu\GPU\RSX\Overlays</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\RSX\Overlays\overlay_list_view.cpp">
+      <Filter>Emu\GPU\RSX\Overlays</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\RSX\Overlays\overlay_edit_text.cpp">
+      <Filter>Emu\GPU\RSX\Overlays</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\RSX\Overlays\overlay_progress_bar.cpp">
+      <Filter>Emu\GPU\RSX\Overlays</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Crypto\aes.h">
@@ -1423,6 +1450,9 @@
     <ClInclude Include="Emu\Cell\lv2\sys_net.h">
       <Filter>Emu\Cell\lv2</Filter>
     </ClInclude>
+    <ClInclude Include="Emu\Cell\lv2\sys_overlay.h">
+      <Filter>Emu\Cell\lv2</Filter>
+    </ClInclude>
     <ClInclude Include="Emu\Cell\lv2\sys_gpio.h">
       <Filter>Emu\Cell\lv2</Filter>
     </ClInclude>
@@ -1488,6 +1518,9 @@
     </ClInclude>
     <ClInclude Include="Emu\Audio\Null\NullAudioBackend.h">
       <Filter>Emu\Audio\Null</Filter>
+    </ClInclude>
+    <ClInclude Include="Emu\RSX\Common\surface_utils.h">
+      <Filter>Emu\GPU\RSX\Common</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>

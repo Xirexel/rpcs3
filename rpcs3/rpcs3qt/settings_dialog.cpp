@@ -525,6 +525,9 @@ settings_dialog::settings_dialog(std::shared_ptr<gui_settings> guiSettings, std:
 	xemu_settings->EnhanceComboBox(ui->frameLimitBox, emu_settings::FrameLimit);
 	SubscribeTooltip(ui->frameLimitBox, json_gpu_cbo["frameLimitBox"].toString());
 
+	xemu_settings->EnhanceComboBox(ui->antiAliasing, emu_settings::MSAA);
+	SubscribeTooltip(ui->antiAliasing, json_gpu_cbo["antiAliasing"].toString());
+
 	xemu_settings->EnhanceComboBox(ui->anisotropicFilterOverride, emu_settings::AnisotropicFilterOverride, true);
 	SubscribeTooltip(ui->anisotropicFilterOverride, json_gpu_cbo["anisotropicFilterOverride"].toString());
 	// only allow values 0,2,4,8,16
@@ -861,7 +864,7 @@ settings_dialog::settings_dialog(std::shared_ptr<gui_settings> guiSettings, std:
 
 	// Comboboxes
 
-	xemu_settings->EnhanceComboBox(ui->sysLangBox, emu_settings::Language);
+	xemu_settings->EnhanceComboBox(ui->sysLangBox, emu_settings::Language, false, false, 0, true);
 	SubscribeTooltip(ui->sysLangBox, json_sys["sysLangBox"].toString());
 
 	// Checkboxes
@@ -1346,9 +1349,6 @@ settings_dialog::settings_dialog(std::shared_ptr<gui_settings> guiSettings, std:
 	xemu_settings->EnhanceCheckBox(ui->spuDebug, emu_settings::SPUDebug);
 	SubscribeTooltip(ui->spuDebug, json_debug["spuDebug"].toString());
 
-	xemu_settings->EnhanceCheckBox(ui->spuVerification, emu_settings::SPUVerification);
-	SubscribeTooltip(ui->spuVerification, json_debug["spuVerification"].toString());
-
 	xemu_settings->EnhanceCheckBox(ui->setDAZandFTZ, emu_settings::SetDAZandFTZ);
 	SubscribeTooltip(ui->setDAZandFTZ, json_debug["setDAZandFTZ"].toString());
 
@@ -1363,6 +1363,11 @@ settings_dialog::settings_dialog(std::shared_ptr<gui_settings> guiSettings, std:
 
 	xemu_settings->EnhanceCheckBox(ui->debugConsoleMode, emu_settings::DebugConsoleMode);
 	SubscribeTooltip(ui->debugConsoleMode, json_debug["debugConsoleMode"].toString());
+
+	// Comboboxes
+	xemu_settings->EnhanceComboBox(ui->maxSPURSThreads, emu_settings::MaxSPURSThreads, true);
+	ui->maxSPURSThreads->setItemText(ui->maxSPURSThreads->findData("6"), tr("Unlimited (Default)"));
+	SubscribeTooltip(ui->maxSPURSThreads, json_debug["maxSPURSThreads"].toString());
 
 	// Layout fix for High Dpi
 	layout()->setSizeConstraint(QLayout::SetFixedSize);

@@ -63,7 +63,7 @@ target_link_libraries(rpcs3_emu
 	PRIVATE
 		3rdparty::stblib 3rdparty::libpng)
 
-if(CMAKE_COMPILER_IS_GNUCXX AND (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 7 OR CMAKE_CXX_COMPILER_VERSION VERSION_EQUAL 7))
+if(CMAKE_COMPILER_IS_GNUCXX)
 	target_link_libraries(rpcs3_emu PUBLIC -latomic)
 endif()
 
@@ -111,10 +111,10 @@ target_link_libraries(rpcs3_emu
 	PUBLIC
 		3rdparty::ffmpeg 3rdparty::cereal
 		3rdparty::opengl 3rdparty::stblib
-		3rdparty::vulkan
+		3rdparty::vulkan 3rdparty::glew
 	PRIVATE
 		3rdparty::gsl 3rdparty::xxhash
-		3rdparty::dx12 3rdparty::glew)
+		3rdparty::dx12)
 
 
 # Setup cotire

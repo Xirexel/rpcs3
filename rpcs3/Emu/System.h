@@ -148,6 +148,12 @@ enum class frame_limit_type
 	_auto,
 };
 
+enum class msaa_level
+{
+	none,
+	_auto
+};
+
 enum class detail_level
 {
 	minimal,
@@ -189,12 +195,12 @@ struct EmuCallbacks
 	std::function<void()> on_stop;
 	std::function<void()> on_ready;
 	std::function<void()> exit;
-	std::function<void()> reset_pads;
+	std::function<void(const std::string&)> reset_pads;
 	std::function<void(bool)> enable_pads;
 	std::function<void(s32, s32)> handle_taskbar_progress; // (type, value) type: 0 for reset, 1 for increment, 2 for set_limit
 	std::function<std::shared_ptr<class KeyboardHandlerBase>()> get_kb_handler;
 	std::function<std::shared_ptr<class MouseHandlerBase>()> get_mouse_handler;
-	std::function<std::shared_ptr<class pad_thread>()> get_pad_handler;
+	std::function<std::shared_ptr<class pad_thread>(const std::string&)> get_pad_handler;
 	std::function<std::unique_ptr<class GSFrameBase>()> get_gs_frame;
 	std::function<std::shared_ptr<class GSRender>()> get_gs_render;
 	std::function<std::shared_ptr<class AudioBackend>()> get_audio;
@@ -214,11 +220,13 @@ class Emulator final
 	atomic_t<u64> m_pause_amend_time; // increased when resumed
 
 	std::string m_path;
+	std::string m_path_old;
 	std::string m_title_id;
 	std::string m_title;
 	std::string m_cat;
 	std::string m_dir;
 	std::string m_sfo_dir;
+	std::string m_game_dir{"PS3_GAME"};
 	std::string m_usr{"00000001"};
 	u32 m_usrid{1};
 
@@ -310,7 +318,7 @@ public:
 
 	std::string PPUCache() const;
 
-	bool BootGame(const std::string& path, bool direct = false, bool add_only = false, bool force_global_config = false);
+	bool BootGame(const std::string& path, const std::string& title_id = "", bool direct = false, bool add_only = false, bool force_global_config = false);
 	bool BootRsxCapture(const std::string& path);
 	bool InstallPkg(const std::string& path);
 
@@ -321,14 +329,16 @@ private:
 	void LimitCacheSize();
 public:
 	static std::string GetHddDir();
-	static std::string GetSfoDirFromGamePath(const std::string& game_path, const std::string& user);
+	static std::string GetSfoDirFromGamePath(const std::string& game_path, const std::string& user, const std::string& title_id = "");
 
 	static std::string GetCustomConfigDir();
 	static std::string GetCustomConfigPath(const std::string& title_id, bool get_deprecated_path = false);
+	static std::string GetCustomInputConfigDir(const std::string& title_id);
+	static std::string GetCustomInputConfigPath(const std::string& title_id);
 
 	void SetForceBoot(bool force_boot);
 
-	void Load(bool add_only = false, bool force_global_config = false);
+	void Load(const std::string& title_id = "", bool add_only = false, bool force_global_config = false);
 	void Run();
 	bool Pause();
 	void Resume();
@@ -371,6 +381,7 @@ struct cfg_root : cfg::node
 		cfg::_int<0, 6> preferred_spu_threads{this, "Preferred SPU Threads", 0}; //Numnber of hardware threads dedicated to heavy simultaneous spu tasks
 		cfg::_int<0, 16> spu_delay_penalty{this, "SPU delay penalty", 3}; //Number of milliseconds to block a thread if a virtual 'core' isn't free
 		cfg::_bool spu_loop_detection{this, "SPU loop detection", true}; //Try to detect wait loops and trigger thread yield
+		cfg::_int<0, 6> max_spurs_threads{this, "Max SPURS Threads", 6}; // HACK. If less then 6, max number of running SPURS threads in each thread group.
 		cfg::_enum<spu_block_size_type> spu_block_size{this, "SPU Block Size", spu_block_size_type::safe};
 		cfg::_bool spu_accurate_getllar{this, "Accurate GETLLAR", false};
 		cfg::_bool spu_accurate_putlluc{this, "Accurate PUTLLUC", false};
@@ -424,6 +435,7 @@ struct cfg_root : cfg::node
 		cfg::_enum<video_resolution> resolution{this, "Resolution", video_resolution::_720};
 		cfg::_enum<video_aspect> aspect_ratio{this, "Aspect ratio", video_aspect::_16_9};
 		cfg::_enum<frame_limit_type> frame_limit{this, "Frame limit", frame_limit_type::none};
+		cfg::_enum<msaa_level> antialiasing_level{this, "MSAA", msaa_level::_auto};
 
 		cfg::_bool write_color_buffers{this, "Write Color Buffers"};
 		cfg::_bool write_depth_buffer{this, "Write Depth Buffer"};
@@ -448,6 +460,7 @@ struct cfg_root : cfg::node
 		cfg::_bool full_rgb_range_output{this, "Use full RGB output range", true}; // Video out dynamic range
 		cfg::_bool disable_asynchronous_shader_compiler{this, "Disable Asynchronous Shader Compiler", false};
 		cfg::_bool strict_texture_flushing{this, "Strict Texture Flushing", false};
+		cfg::_bool disable_native_float16{this, "Disable native float16 support", false};
 		cfg::_int<1, 8> consequtive_frames_to_draw{this, "Consecutive Frames To Draw", 1};
 		cfg::_int<1, 8> consequtive_frames_to_skip{this, "Consecutive Frames To Skip", 1};
 		cfg::_int<50, 800> resolution_scale_percent{this, "Resolution Scale", 100};
@@ -478,7 +491,7 @@ struct cfg_root : cfg::node
 			node_perf_overlay(cfg::node* _this) : cfg::node(_this, "Performance Overlay") {}
 
 			cfg::_bool perf_overlay_enabled{this, "Enabled", false};
-			cfg::_enum<detail_level> level{this, "Detail level", detail_level::high};
+			cfg::_enum<detail_level> level{this, "Detail level", detail_level::medium};
 			cfg::_int<30, 5000> update_interval{ this, "Metrics update interval (ms)", 350 };
 			cfg::_int<4, 36> font_size{ this, "Font size (px)", 10 };
 			cfg::_enum<screen_quadrant> position{this, "Position", screen_quadrant::top_left};

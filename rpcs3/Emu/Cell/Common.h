@@ -12,5 +12,5 @@ enum FPSCR_RN
 // Get the exponent of a float
 inline int fexpf(float x)
 {
-	return ((u32&)x >> 23) & 0xFF;
+	return (std::bit_cast<u32>(x) >> 23) & 0xff;
 }

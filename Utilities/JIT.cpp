@@ -190,18 +190,34 @@ asmjit::JitRuntime& asmjit::get_global_runtime()
 	return g_rt;
 }
 
-asmjit::Label asmjit::build_transaction_enter(asmjit::X86Assembler& c, asmjit::Label fallback)
+void asmjit::build_transaction_enter(asmjit::X86Assembler& c, asmjit::Label fallback, const asmjit::X86Gp& ctr, uint less_than)
 {
 	Label fall = c.newLabel();
 	Label begin = c.newLabel();
 	c.jmp(begin);
 	c.bind(fall);
-	c.test(x86::eax, _XABORT_RETRY);
-	c.jz(fallback);
+
+	if (less_than < 65)
+	{
+		c.add(ctr, 1);
+		c.test(x86::eax, _XABORT_RETRY);
+		c.jz(fallback);
+	}
+	else
+	{
+		// Count an attempt without RETRY flag as 65 normal attempts and continue
+		c.not_(x86::eax);
+		c.and_(x86::eax, _XABORT_RETRY);
+		c.shl(x86::eax, 5);
+		c.add(x86::eax, 1); // eax = RETRY ? 1 : 65
+		c.add(ctr, x86::rax);
+	}
+
+	c.cmp(ctr, less_than);
+	c.jae(fallback);
 	c.align(kAlignCode, 16);
 	c.bind(begin);
 	c.xbegin(fall);
-	return begin;
 }
 
 void asmjit::build_transaction_abort(asmjit::X86Assembler& c, unsigned char code)
@@ -250,6 +266,7 @@ static void* const s_memory = []() -> void*
 {
 	llvm::InitializeNativeTarget();
 	llvm::InitializeNativeTargetAsmPrinter();
+	llvm::InitializeNativeTargetAsmParser();
 	LLVMLinkInMCJIT();
 
 #ifdef MAP_32BIT
@@ -474,7 +491,7 @@ struct MemoryManager : llvm::RTDyldMemoryManager
 		s_unfire.push_front(std::make_pair(addr, size));
 #endif
 
-		return RTDyldMemoryManager::registerEHFrames(addr, load_addr, size);
+		return RTDyldMemoryManager::registerEHFramesInProcess(addr, size);
 	}
 
 	void deregisterEHFrames() override
@@ -508,6 +525,10 @@ struct MemoryManager2 : llvm::RTDyldMemoryManager
 
 	void registerEHFrames(u8* addr, u64 load_addr, std::size_t size) override
 	{
+#ifndef _WIN32
+		RTDyldMemoryManager::registerEHFramesInProcess(addr, size);
+		s_unfire.push_front(std::make_pair(addr, size));
+#endif
 	}
 
 	void deregisterEHFrames() override
@@ -768,25 +789,6 @@ jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, co
 
 jit_compiler::~jit_compiler()
 {
-}
-
-bool jit_compiler::has_ssse3() const
-{
-	if (m_cpu == "generic" ||
-		m_cpu == "k8" ||
-		m_cpu == "opteron" ||
-		m_cpu == "athlon64" ||
-		m_cpu == "athlon-fx" ||
-		m_cpu == "k8-sse3" ||
-		m_cpu == "opteron-sse3" ||
-		m_cpu == "athlon64-sse3" ||
-		m_cpu == "amdfam10" ||
-		m_cpu == "barcelona")
-	{
-		return false;
-	}
-
-	return true;
 }
 
 void jit_compiler::add(std::unique_ptr<llvm::Module> module, const std::string& path)

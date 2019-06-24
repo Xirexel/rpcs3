@@ -65,10 +65,11 @@ namespace fs
 		s64 ctime;
 	};
 
-	// Native handle getter
-	struct get_native_handle
+	// Helper, layout is equal to iovec struct
+	struct iovec_clone
 	{
-		virtual native_handle get() = 0;
+		const void* iov_base;
+		std::size_t iov_len;
 	};
 
 	// File handle base
@@ -83,6 +84,8 @@ namespace fs
 		virtual u64 write(const void* buffer, u64 size) = 0;
 		virtual u64 seek(s64 offset, seek_mode whence) = 0;
 		virtual u64 size() = 0;
+		virtual native_handle get_handle();
+		virtual u64 write_gather(const iovec_clone* buffers, u64 buf_count);
 	};
 
 	// Directory entry (TODO)
@@ -366,6 +369,18 @@ namespace fs
 
 		// Get native handle if available
 		native_handle get_handle() const;
+
+		// Gathered write
+		u64 write_gather(const iovec_clone* buffers, u64 buf_count) const
+		{
+			if (!m_file) xnull();
+			return m_file->write_gather(buffers, buf_count);
+		}
+
+#ifdef _WIN32
+		// Windows-specific function
+		bool set_delete(bool autodelete = true) const;
+#endif
 	};
 
 	class dir final

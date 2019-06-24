@@ -1,15 +1,17 @@
 # Check and configure compiler options for RPCS3
 
 if(CMAKE_COMPILER_IS_GNUCXX)
-	# GCC 7.3 or latter is required
-	if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 7.3)
-		message(FATAL_ERROR "RPCS3 requires at least gcc-7.3.")
+	# GCC 8.1 or latter is required
+	if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 8)
+		message(FATAL_ERROR "RPCS3 requires at least gcc-8.")
 	endif()
 
 	# Set compiler options here
 
 	# Warnings
+	add_compile_options(-Wall)
 	add_compile_options(-Wno-attributes -Wno-enum-compare -Wno-invalid-offsetof)
+	add_compile_options(-Wno-unknown-pragmas -Wno-unused-variable -Wno-reorder -Wno-comment)
 
 elseif(${CMAKE_CXX_COMPILER_ID} MATCHES "Clang")
 	# Clang 5.0 or latter is required
@@ -20,6 +22,7 @@ elseif(${CMAKE_CXX_COMPILER_ID} MATCHES "Clang")
 	# Set compiler options here
 
 	add_compile_options(-ftemplate-depth=1024)
+	add_compile_options(-Wunused-value -Wunused-comparison)
 	if(APPLE)
 		add_compile_options(-stdlib=libc++)
 	endif()
@@ -43,6 +46,9 @@ if(NOT MSVC)
 
 		# Workaround for mingw64 (MSYS2)
 		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--allow-multiple-definition")
+
+		# Increase stack limit to 8 MB
+		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--stack -Wl,8388608")
 
 		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_FORMAT_MACROS=1")
 	endif()
@@ -75,6 +81,9 @@ else()
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zc:throwingNew /D _CRT_SECURE_NO_DEPRECATE=1 /D _CRT_NON_CONFORMING_SWPRINTFS=1 /D _SCL_SECURE_NO_WARNINGS=1")
 
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /D _ENABLE_EXTENDED_ALIGNED_STORAGE=1")
+
+	# Increase stack limit to 8 MB
+	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /STACK:8388608,1048576")
 
 	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /NODEFAULTLIB:libc.lib /NODEFAULTLIB:libcmt.lib /NODEFAULTLIB:libcd.lib /NODEFAULTLIB:libcmtd.lib /NODEFAULTLIB:msvcrtd.lib")
 	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SUBSYSTEM:WINDOWS /DYNAMICBASE:NO /BASE:0x10000 /FIXED")

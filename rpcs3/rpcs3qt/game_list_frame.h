@@ -171,6 +171,7 @@ struct gui_game_info
 	QImage icon;
 	QPixmap pxmap;
 	bool hasCustomConfig;
+	bool hasCustomPadConfig;
 };
 
 typedef std::shared_ptr<gui_game_info> game_info;
@@ -211,21 +212,23 @@ public:
 	void SetShowHidden(bool show);
 
 public Q_SLOTS:
+	void BatchCreatePPUCaches();
+	void BatchRemovePPUCaches();
+	void BatchRemoveSPUCaches();
+	void BatchRemoveCustomConfigurations();
+	void BatchRemoveCustomPadConfigurations();
+	void BatchRemoveShaderCaches();
 	void SetListMode(const bool& isList);
 	void SetSearchText(const QString& text);
 	void SetShowCompatibilityInGrid(bool show);
 
 private Q_SLOTS:
-	bool RemoveCustomConfiguration(const std::string& base_dir, bool is_interactive = false);
-	bool RemoveShadersCache(const std::string& base_dir, bool is_interactive = false);
-	bool RemovePPUCache(const std::string& base_dir, bool is_interactive = false);
-	bool RemoveSPUCache(const std::string& base_dir, bool is_interactive = false);
 	void OnColClicked(int col);
 	void ShowContextMenu(const QPoint &pos);
 	void doubleClickedSlot(QTableWidgetItem *item);
 Q_SIGNALS:
 	void GameListFrameClosed();
-	void RequestBoot(const std::string& path, bool force_global_config = false);
+	void RequestBoot(const game_info& game, bool force_global_config = false);
 	void RequestIconSizeChange(const int& val);
 protected:
 	/** Override inherited method from Qt to allow signalling when close happened.*/
@@ -233,9 +236,9 @@ protected:
 	void resizeEvent(QResizeEvent *event) override;
 	bool eventFilter(QObject *object, QEvent *event) override;
 private:
-	QPixmap PaintedPixmap(const QImage& img, bool paint_config_icon = false, const QColor& color = QColor());
+	QPixmap PaintedPixmap(const QImage& img, bool paint_config_icon = false, bool paint_pad_config_icon = false, const QColor& color = QColor());
 	QColor getGridCompatibilityColor(const QString& string);
-	void ShowCustomConfigIcon(QTableWidgetItem* item, bool enabled);
+	void ShowCustomConfigIcon(QTableWidgetItem* item);
 	void PopulateGameGrid(int maxCols, const QSize& image_size, const QColor& image_color);
 	bool IsEntryVisible(const game_info& game);
 	void SortGameList();
@@ -243,6 +246,15 @@ private:
 	int PopulateGameList();
 	bool SearchMatchesApp(const std::string& name, const std::string& serial);
 
+	bool RemoveCustomConfiguration(const std::string& title_id, game_info game = nullptr, bool is_interactive = false);
+	bool RemoveCustomPadConfiguration(const std::string& title_id, game_info game = nullptr, bool is_interactive = false);
+	bool RemoveShadersCache(const std::string& base_dir, bool is_interactive = false);
+	bool RemovePPUCache(const std::string& base_dir, bool is_interactive = false);
+	bool RemoveSPUCache(const std::string& base_dir, bool is_interactive = false);
+	bool CreatePPUCache(const game_info& game);
+
+	std::string GetCacheDirBySerial(const std::string& serial);
+	std::string GetDataDirBySerial(const std::string& serial);
 	std::string CurrentSelectionIconPath();
 	std::string GetStringFromU32(const u32& key, const std::map<u32, QString>& map, bool combined = false);
 
@@ -289,5 +301,5 @@ private:
 	QSize m_Icon_Size = gui::gl_icon_size_min; // ensure a valid size
 	qreal m_Margin_Factor;
 	qreal m_Text_Factor;
-	bool m_drawCompatStatusToGrid;
+	bool m_drawCompatStatusToGrid = false;
 };

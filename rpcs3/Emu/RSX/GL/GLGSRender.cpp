@@ -29,12 +29,12 @@ u64 GLGSRender::get_cycles()
 
 GLGSRender::GLGSRender() : GSRender()
 {
-	m_shaders_cache.reset(new gl::shader_cache(m_prog_buffer, "opengl", "v1.6"));
+	m_shaders_cache = std::make_unique<gl::shader_cache>(m_prog_buffer, "opengl", "v1.6");
 
 	if (g_cfg.video.disable_vertex_cache)
-		m_vertex_cache.reset(new gl::null_vertex_cache());
+		m_vertex_cache = std::make_unique<gl::null_vertex_cache>();
 	else
-		m_vertex_cache.reset(new gl::weak_vertex_cache());
+		m_vertex_cache = std::make_unique<gl::weak_vertex_cache>();
 
 	supports_multidraw = true;
 	supports_native_ui = (bool)g_cfg.misc.use_native_interface;
@@ -57,7 +57,7 @@ namespace
 		case rsx::comparison_function::greater_or_equal: return GL_GEQUAL;
 		case rsx::comparison_function::always: return GL_ALWAYS;
 		}
-		fmt::throw_exception("Unsupported comparison op 0x%X" HERE, (u32)op);;
+		fmt::throw_exception("Unsupported comparison op 0x%X" HERE, (u32)op);
 	}
 
 	GLenum stencil_op(rsx::stencil_op op)
@@ -214,19 +214,19 @@ void GLGSRender::end()
 	gl::render_target *ds = std::get<1>(m_rtts.m_bound_depth_stencil);
 
 	// Handle special memory barrier for ARGB8->D24S8 in an active DSV
-	if (ds && ds->old_contents != nullptr &&
-		ds->old_contents->get_internal_format() == gl::texture::internal_format::rgba8 &&
-		rsx::pitch_compatible(ds, static_cast<gl::render_target*>(ds->old_contents)))
+	if (ds && ds->old_contents &&
+		ds->old_contents.source->get_internal_format() == gl::texture::internal_format::rgba8 &&
+		rsx::pitch_compatible(ds, gl::as_rtt(ds->old_contents.source)))
 	{
 		gl_state.enable(GL_FALSE, GL_SCISSOR_TEST);
 
 		// TODO: Stencil transfer
 		gl::g_hw_blitter->fast_clear_image(cmd, ds, 1.f, 0xFF);
+		ds->old_contents.init_transfer(ds);
 
-		const auto region = rsx::get_transferable_region(ds);
-		m_depth_converter.run({0, 0, std::get<0>(region), std::get<1>(region)},
-			{0, 0, std::get<2>(region), std::get<3>(region)},
-			ds->old_contents, ds);
+		m_depth_converter.run(ds->old_contents.src_rect(),
+			ds->old_contents.dst_rect(),
+			ds->old_contents.source, ds);
 
 		ds->on_write();
 	}
@@ -400,7 +400,7 @@ void GLGSRender::end()
 	std::chrono::time_point<steady_clock> draw_start = textures_end;
 
 	// Optionally do memory synchronization if the texture stage has not yet triggered this
-	if (g_cfg.video.strict_rendering_mode)
+	if (true)//g_cfg.video.strict_rendering_mode)
 	{
 		gl_state.enable(GL_FALSE, GL_SCISSOR_TEST);
 
@@ -414,55 +414,57 @@ void GLGSRender::end()
 			}
 		}
 	}
-
-	rsx::simple_array<int> buffers_to_clear;
-	bool clear_all_color = true;
-	bool clear_depth = false;
-
-	for (int index = 0; index < 4; index++)
+	else
 	{
-		if (std::get<0>(m_rtts.m_bound_render_targets[index]) != 0)
+		rsx::simple_array<int> buffers_to_clear;
+		bool clear_all_color = true;
+		bool clear_depth = false;
+
+		for (int index = 0; index < 4; index++)
 		{
-			if (std::get<1>(m_rtts.m_bound_render_targets[index])->cleared())
-				clear_all_color = false;
-			else
-				buffers_to_clear.push_back(index);
-		}
-	}
-
-	if (ds && !ds->cleared())
-	{
-		clear_depth = true;
-	}
-
-	if (clear_depth || buffers_to_clear.size() > 0)
-	{
-		gl_state.enable(GL_FALSE, GL_SCISSOR_TEST);
-		GLenum mask = 0;
-
-		if (clear_depth)
-		{
-			gl_state.depth_mask(GL_TRUE);
-			gl_state.clear_depth(1.f);
-			gl_state.clear_stencil(255);
-			mask |= GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
+			if (m_rtts.m_bound_render_targets[index].first)
+			{
+				if (!m_rtts.m_bound_render_targets[index].second->dirty())
+					clear_all_color = false;
+				else
+					buffers_to_clear.push_back(index);
+			}
 		}
 
-		if (clear_all_color)
-			mask |= GL_COLOR_BUFFER_BIT;
-
-		glClear(mask);
-
-		if (buffers_to_clear.size() > 0 && !clear_all_color)
+		if (ds && ds->dirty())
 		{
-			GLfloat colors[] = { 0.f, 0.f, 0.f, 0.f };
-			//It is impossible for the render target to be type A or B here (clear all would have been flagged)
-			for (auto &i : buffers_to_clear)
-				glClearBufferfv(GL_COLOR, i, colors);
+			clear_depth = true;
 		}
 
-		if (clear_depth)
-			gl_state.depth_mask(rsx::method_registers.depth_write_enabled());
+		if (clear_depth || !buffers_to_clear.empty())
+		{
+			gl_state.enable(GL_FALSE, GL_SCISSOR_TEST);
+			GLenum mask = 0;
+
+			if (clear_depth)
+			{
+				gl_state.depth_mask(GL_TRUE);
+				gl_state.clear_depth(1.f);
+				gl_state.clear_stencil(255);
+				mask |= GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
+			}
+
+			if (clear_all_color)
+				mask |= GL_COLOR_BUFFER_BIT;
+
+			glClear(mask);
+
+			if (!buffers_to_clear.empty() && !clear_all_color)
+			{
+				GLfloat colors[] = { 0.f, 0.f, 0.f, 0.f };
+				//It is impossible for the render target to be type A or B here (clear all would have been flagged)
+				for (auto &i : buffers_to_clear)
+					glClearBufferfv(GL_COLOR, i, colors);
+			}
+
+			if (clear_depth)
+				gl_state.depth_mask(rsx::method_registers.depth_write_enabled());
+		}
 	}
 
 	// Unconditionally enable stencil test if it was disabled before
@@ -672,7 +674,7 @@ void GLGSRender::set_scissor()
 		return;
 	}
 
-	m_graphics_state &= ~(rsx::pipeline_state::scissor_config_state_dirty | rsx::pipeline_state::scissor_config_state_dirty);
+	m_graphics_state &= ~(rsx::pipeline_state::scissor_config_state_dirty | rsx::pipeline_state::scissor_setup_invalid);
 
 	const auto clip_width = rsx::apply_resolution_scale(rsx::method_registers.surface_clip_width(), true);
 	const auto clip_height = rsx::apply_resolution_scale(rsx::method_registers.surface_clip_height(), true);
@@ -826,25 +828,25 @@ void GLGSRender::on_init_thread()
 		LOG_WARNING(RSX, "Using legacy openGL buffers.");
 		manually_flush_ring_buffers = true;
 
-		m_attrib_ring_buffer.reset(new gl::legacy_ring_buffer());
-		m_transform_constants_buffer.reset(new gl::legacy_ring_buffer());
-		m_fragment_constants_buffer.reset(new gl::legacy_ring_buffer());
-		m_fragment_env_buffer.reset(new gl::legacy_ring_buffer());
-		m_vertex_env_buffer.reset(new gl::legacy_ring_buffer());
-		m_texture_parameters_buffer.reset(new gl::legacy_ring_buffer());
-		m_vertex_layout_buffer.reset(new gl::legacy_ring_buffer());
-		m_index_ring_buffer.reset(new gl::legacy_ring_buffer());
+		m_attrib_ring_buffer = std::make_unique<gl::legacy_ring_buffer>();
+		m_transform_constants_buffer = std::make_unique<gl::legacy_ring_buffer>();
+		m_fragment_constants_buffer = std::make_unique<gl::legacy_ring_buffer>();
+		m_fragment_env_buffer = std::make_unique<gl::legacy_ring_buffer>();
+		m_vertex_env_buffer = std::make_unique<gl::legacy_ring_buffer>();
+		m_texture_parameters_buffer = std::make_unique<gl::legacy_ring_buffer>();
+		m_vertex_layout_buffer = std::make_unique<gl::legacy_ring_buffer>();
+		m_index_ring_buffer = std::make_unique<gl::legacy_ring_buffer>();
 	}
 	else
 	{
-		m_attrib_ring_buffer.reset(new gl::ring_buffer());
-		m_transform_constants_buffer.reset(new gl::ring_buffer());
-		m_fragment_constants_buffer.reset(new gl::ring_buffer());
-		m_fragment_env_buffer.reset(new gl::ring_buffer());
-		m_vertex_env_buffer.reset(new gl::ring_buffer());
-		m_texture_parameters_buffer.reset(new gl::ring_buffer());
-		m_vertex_layout_buffer.reset(new gl::ring_buffer());
-		m_index_ring_buffer.reset(new gl::ring_buffer());
+		m_attrib_ring_buffer = std::make_unique<gl::ring_buffer>();
+		m_transform_constants_buffer = std::make_unique<gl::ring_buffer>();
+		m_fragment_constants_buffer = std::make_unique<gl::ring_buffer>();
+		m_fragment_env_buffer = std::make_unique<gl::ring_buffer>();
+		m_vertex_env_buffer = std::make_unique<gl::ring_buffer>();
+		m_texture_parameters_buffer = std::make_unique<gl::ring_buffer>();
+		m_vertex_layout_buffer = std::make_unique<gl::ring_buffer>();
+		m_index_ring_buffer = std::make_unique<gl::ring_buffer>();
 	}
 
 	m_attrib_ring_buffer->create(gl::buffer::target::texture, 256 * 0x100000);
@@ -858,7 +860,7 @@ void GLGSRender::on_init_thread()
 
 	if (gl_caps.vendor_AMD)
 	{
-		m_identity_index_buffer.reset(new gl::buffer);
+		m_identity_index_buffer = std::make_unique<gl::buffer>();
 		m_identity_index_buffer->create(gl::buffer::target::element_array, 1 * 0x100000);
 
 		// Initialize with 256k identity entries
@@ -937,12 +939,8 @@ void GLGSRender::on_init_thread()
 
 	if (!supports_native_ui)
 	{
-		m_frame->disable_wm_event_queue();
 		m_frame->hide();
-
 		m_shaders_cache->load(nullptr);
-
-		m_frame->enable_wm_event_queue();
 		m_frame->show();
 	}
 	else
@@ -1002,7 +1000,6 @@ void GLGSRender::on_init_thread()
 		}
 		helper(this);
 
-		m_frame->enable_wm_event_queue();
 		m_shaders_cache->load(&helper);
 	}
 }
@@ -1013,6 +1010,7 @@ void GLGSRender::on_exit()
 	zcull_ctrl.release();
 
 	m_prog_buffer.clear();
+	m_rtts.destroy();
 
 	for (auto &fbo : m_framebuffer_cache)
 	{
@@ -1126,9 +1124,21 @@ void GLGSRender::on_exit()
 void GLGSRender::clear_surface(u32 arg)
 {
 	if (skip_frame || !framebuffer_status_valid) return;
+
+	// If stencil write mask is disabled, remove clear_stencil bit
+	if (!rsx::method_registers.stencil_mask()) arg &= ~0x2u;
+
+	// Ignore invalid clear flags
 	if ((arg & 0xf3) == 0) return;
 
 	GLbitfield mask = 0;
+
+	gl::command_context cmd{ gl_state };
+	const bool require_mem_load =
+		rsx::method_registers.scissor_origin_x() > 0 ||
+		rsx::method_registers.scissor_origin_y() > 0 ||
+		rsx::method_registers.scissor_width() < rsx::method_registers.surface_clip_width() ||
+		rsx::method_registers.scissor_height() < rsx::method_registers.surface_clip_height();
 
 	rsx::surface_depth_format surface_depth_format = rsx::method_registers.surface_depth_fmt();
 
@@ -1155,7 +1165,7 @@ void GLGSRender::clear_surface(u32 arg)
 				mask |= GLenum(gl::buffers::stencil);
 			}
 
-			if ((arg & 0x3) != 0x3 && ds->dirty)
+			if ((arg & 0x3) != 0x3 && !require_mem_load && ds->dirty())
 			{
 				verify(HERE), mask;
 
@@ -1179,6 +1189,8 @@ void GLGSRender::clear_surface(u32 arg)
 
 		if (mask)
 		{
+			if (require_mem_load) ds->write_barrier(cmd);
+
 			// Memory has been initialized
 			m_rtts.on_write(std::get<0>(m_rtts.m_bound_depth_stencil));
 		}
@@ -1214,8 +1226,9 @@ void GLGSRender::clear_surface(u32 arg)
 
 			for (auto &rtt : m_rtts.m_bound_render_targets)
 			{
-				if (const auto address = std::get<0>(rtt))
+				if (const auto address = rtt.first)
 				{
+					if (require_mem_load) rtt.second->write_barrier(cmd);
 					m_rtts.on_write(address);
 				}
 			}
@@ -1564,7 +1577,7 @@ void GLGSRender::update_draw_state()
 	m_begin_time += (u32)std::chrono::duration_cast<std::chrono::microseconds>(now - then).count();
 }
 
-void GLGSRender::flip(int buffer)
+void GLGSRender::flip(int buffer, bool emu_flip)
 {
 	if (skip_frame)
 	{
@@ -1586,13 +1599,21 @@ void GLGSRender::flip(int buffer)
 	u32 buffer_height = display_buffers[buffer].height;
 	u32 buffer_pitch = display_buffers[buffer].pitch;
 
-	if (!buffer_pitch) buffer_pitch = buffer_width * 4;
+	u32 av_format;
+	const auto avconfig = fxm::get<rsx::avconf>();
 
-	auto avconfig = fxm::get<rsx::avconf>();
 	if (avconfig)
 	{
+		av_format = avconfig->get_compatible_gcm_format();
+		if (!buffer_pitch) buffer_pitch = buffer_width * avconfig->get_bpp();
+
 		buffer_width = std::min(buffer_width, avconfig->resolution_x);
 		buffer_height = std::min(buffer_height, avconfig->resolution_y);
+	}
+	else
+	{
+		av_format = CELL_GCM_TEXTURE_A8R8G8B8;
+		if (!buffer_pitch) buffer_pitch = buffer_width * 4;
 	}
 
 	// Disable scissor test (affects blit, clear, etc)
@@ -1631,12 +1652,10 @@ void GLGSRender::flip(int buffer)
 		aspect_ratio.size = new_size;
 
 		// Find the source image
-		rsx::tiled_region buffer_region = get_tiled_address(display_buffers[buffer].offset, CELL_GCM_LOCATION_LOCAL);
-		u32 absolute_address = buffer_region.address + buffer_region.base;
-
+		const u32 absolute_address = rsx::get_address(display_buffers[buffer].offset, CELL_GCM_LOCATION_LOCAL);
 		GLuint image = GL_NONE;
 
-		if (auto render_target_texture = m_rtts.get_texture_from_render_target_if_applicable(absolute_address))
+		if (auto render_target_texture = m_rtts.get_color_surface_at(absolute_address))
 		{
 			if (render_target_texture->last_use_tag == m_rtts.write_tag)
 			{
@@ -1666,14 +1685,14 @@ void GLGSRender::flip(int buffer)
 					// TODO: Take AA scaling into account
 					LOG_WARNING(RSX, "Selected output image does not satisfy the video configuration. Display buffer resolution=%dx%d, avconf resolution=%dx%d, surface=%dx%d",
 						display_buffers[buffer].width, display_buffers[buffer].height, avconfig ? avconfig->resolution_x : 0, avconfig ? avconfig->resolution_y : 0,
-						render_target_texture->get_surface_width(), render_target_texture->get_surface_height());
+						render_target_texture->get_surface_width(rsx::surface_metrics::pixels), render_target_texture->get_surface_height(rsx::surface_metrics::pixels));
 
 					buffer_width = render_target_texture->width();
 					buffer_height = render_target_texture->height();
 				}
 			}
 		}
-		else if (auto surface = m_gl_texture_cache.find_texture_from_dimensions<true>(absolute_address, buffer_width, buffer_height))
+		else if (auto surface = m_gl_texture_cache.find_texture_from_dimensions<true>(absolute_address, av_format, buffer_width, buffer_height))
 		{
 			//Hack - this should be the first location to check for output
 			//The render might have been done offscreen or in software and a blit used to display
@@ -1689,19 +1708,10 @@ void GLGSRender::flip(int buffer)
 
 			if (!m_flip_tex_color || m_flip_tex_color->size2D() != sizei{ (int)buffer_width, (int)buffer_height })
 			{
-				m_flip_tex_color.reset(new gl::texture(GL_TEXTURE_2D, buffer_width, buffer_height, 1, 1, GL_RGBA8));
+				m_flip_tex_color = std::make_unique<gl::texture>(GL_TEXTURE_2D, buffer_width, buffer_height, 1, 1, GL_RGBA8);
 			}
 
-			if (buffer_region.tile)
-			{
-				std::unique_ptr<u8[]> temp(new u8[buffer_height * buffer_pitch]);
-				buffer_region.read(temp.get(), buffer_width, buffer_height, buffer_pitch);
-				m_flip_tex_color->copy_from(temp.get(), gl::texture::format::bgra, gl::texture::type::uint_8_8_8_8, unpack_settings);
-			}
-			else
-			{
-				m_flip_tex_color->copy_from(buffer_region.ptr, gl::texture::format::bgra, gl::texture::type::uint_8_8_8_8, unpack_settings);
-			}
+			m_flip_tex_color->copy_from(vm::base(absolute_address), gl::texture::format::bgra, gl::texture::type::uint_8_8_8_8, unpack_settings);
 
 			image = m_flip_tex_color->id();
 		}
@@ -1789,7 +1799,7 @@ void GLGSRender::flip(int buffer)
 	}
 
 	m_frame->flip(m_context);
-	rsx::thread::flip(buffer);
+	rsx::thread::flip(buffer, emu_flip);
 
 	// Cleanup
 	m_gl_texture_cache.on_frame_end();
@@ -1798,10 +1808,9 @@ void GLGSRender::flip(int buffer)
 	auto removed_textures = m_rtts.free_invalidated();
 	m_framebuffer_cache.remove_if([&](auto& fbo)
 	{
-		if (fbo.deref_count >= 2) return true; // Remove if stale
+		if (fbo.unused_check_count() >= 2) return true; // Remove if stale
 		if (fbo.references_any(removed_textures)) return true; // Remove if any of the attachments is invalid
 
-		fbo.deref_count++;
 		return false;
 	});
 
@@ -1904,13 +1913,11 @@ void GLGSRender::do_local_task(rsx::FIFO_state state)
 		return;
 	}
 
-	m_frame->clear_wm_events();
-
 	if (m_overlay_manager)
 	{
 		if (!in_begin_end && async_flip_requested & flip_request::native_ui)
 		{
-			flip((s32)current_display_buffer);
+			flip((s32)current_display_buffer, false);
 		}
 	}
 }

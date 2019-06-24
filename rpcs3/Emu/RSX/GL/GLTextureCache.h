@@ -168,7 +168,7 @@ namespace gl
 			}
 			else
 			{
-				ASSERT(managed_texture.get() == nullptr);
+				ASSERT(!managed_texture);
 			}
 
 			flushed = false;
@@ -233,7 +233,7 @@ namespace gl
 			if (context == rsx::texture_upload_context::framebuffer_storage)
 			{
 				auto as_rtt = static_cast<gl::render_target*>(vram_texture);
-				if (as_rtt->dirty) as_rtt->read_barrier(cmd);
+				if (as_rtt->dirty()) as_rtt->read_barrier(cmd);
 			}
 
 			gl::texture* target_texture = vram_texture;
@@ -245,18 +245,9 @@ namespace gl
 
 				if (context == rsx::texture_upload_context::framebuffer_storage)
 				{
-					switch (static_cast<gl::render_target*>(vram_texture)->read_aa_mode)
-					{
-					case rsx::surface_antialiasing::center_1_sample:
-						break;
-					case rsx::surface_antialiasing::diagonal_centered_2_samples:
-						real_width *= 2;
-						break;
-					default:
-						real_width *= 2;
-						real_height *= 2;
-						break;
-					}
+					auto surface = gl::as_rtt(vram_texture);
+					real_width *= surface->samples_x;
+					real_height *= surface->samples_y;
 				}
 
 				areai src_area = { 0, 0, 0, 0 };
@@ -299,10 +290,7 @@ namespace gl
 
 			pixel_pack_settings pack_settings;
 			pack_settings.alignment(1);
-
-			//NOTE: AMD proprietary driver bug - disable swap bytes
-			if (!::gl::get_driver_caps().vendor_AMD)
-				pack_settings.swap_bytes(pack_unpack_swap_bytes);
+			pack_settings.swap_bytes(pack_unpack_swap_bytes);
 
 			target_texture->copy_to(nullptr, format, type, pack_settings);
 			real_pitch = target_texture->pitch();
@@ -311,10 +299,10 @@ namespace gl
 			{
 				if (error == GL_OUT_OF_MEMORY && ::gl::get_driver_caps().vendor_AMD)
 				{
-					//AMD driver bug
-					//Pixel transfer fails with GL_OUT_OF_MEMORY. Usually happens with float textures
-					//Failed operations also leak a large amount of memory
-					LOG_ERROR(RSX, "Memory transfer failure (AMD bug). Format=0x%x, Type=0x%x", (u32)format, (u32)type);
+					// AMD driver bug
+					// Pixel transfer fails with GL_OUT_OF_MEMORY. Usually happens with float textures or operations attempting to swap endianness.
+					// Failed operations also leak a large amount of memory
+					LOG_ERROR(RSX, "Memory transfer failure (AMD bug). Please update your driver to Adrenalin 19.4.3 or newer. Format=0x%x, Type=0x%x, Swap=%d", (u32)format, (u32)type, pack_unpack_swap_bytes);
 				}
 				else
 				{
@@ -386,57 +374,6 @@ namespace gl
 				//byte swapping does not work on byte types, use uint_8_8_8_8 for rgba8 instead to avoid penalty
 				rsx::shuffle_texel_data_wzyx<u8>(dst, rsx_pitch, width, align(valid_length, rsx_pitch) / rsx_pitch);
 			}
-			else if (pack_unpack_swap_bytes && ::gl::get_driver_caps().vendor_AMD)
-			{
-				//AMD driver bug - cannot use pack_swap_bytes
-				//Manually byteswap texel data
-				switch (type)
-				{
-				case texture::type::f16:
-				case texture::type::sshort:
-				case texture::type::ushort:
-				case texture::type::ushort_5_6_5:
-				case texture::type::ushort_4_4_4_4:
-				case texture::type::ushort_1_5_5_5_rev:
-				case texture::type::ushort_5_5_5_1:
-				{
-					const u32 num_reps = valid_length / 2;
-					be_t<u16>* in = (be_t<u16>*)(dst);
-					u16* out = (u16*)dst;
-
-					for (u32 n = 0; n < num_reps; ++n)
-					{
-						out[n] = in[n];
-					}
-
-					break;
-				}
-				case texture::type::f32:
-				case texture::type::sint:
-				case texture::type::uint:
-				case texture::type::uint_10_10_10_2:
-				case texture::type::uint_24_8:
-				case texture::type::uint_2_10_10_10_rev:
-				case texture::type::uint_8_8_8_8:
-				{
-					u32 num_reps = valid_length / 4;
-					be_t<u32>* in = (be_t<u32>*)(dst);
-					u32* out = (u32*)dst;
-
-					for (u32 n = 0; n < num_reps; ++n)
-					{
-						out[n] = in[n];
-					}
-
-					break;
-				}
-				default:
-				{
-					LOG_ERROR(RSX, "Texture type 0x%x is not implemented " HERE, (u32)type);
-					break;
-				}
-				}
-			}
 
 			if (context == rsx::texture_upload_context::framebuffer_storage)
 			{
@@ -450,7 +387,7 @@ namespace gl
 		 */
 		void destroy()
 		{
-			if (!is_locked() && pbo_id == 0 && vram_texture == nullptr && m_fence.is_empty() && managed_texture.get() == nullptr)
+			if (!is_locked() && pbo_id == 0 && vram_texture == nullptr && m_fence.is_empty() && !managed_texture)
 				//Already destroyed
 				return;
 
@@ -481,7 +418,7 @@ namespace gl
 
 		bool is_managed() const
 		{
-			return !exists() || managed_texture.get() != nullptr;
+			return !exists() || managed_texture;
 		}
 
 		texture::format get_format() const
@@ -556,8 +493,7 @@ namespace gl
 			std::unique_ptr<gl::texture> image;
 			std::unique_ptr<gl::texture_view> view;
 
-			discardable_storage()
-			{}
+			discardable_storage() = default;
 
 			discardable_storage(std::unique_ptr<gl::texture>& tex)
 			{
@@ -589,58 +525,36 @@ namespace gl
 
 		void clear_temporary_subresources()
 		{
-			m_temporary_surfaces.resize(0);
+			m_temporary_surfaces.clear();
 		}
 
-		gl::texture_view* create_temporary_subresource_impl(gl::texture* src, GLenum sized_internal_fmt, GLenum dst_type, u32 gcm_format,
+		gl::texture_view* create_temporary_subresource_impl(gl::command_context& cmd, gl::texture* src, GLenum sized_internal_fmt, GLenum dst_type, u32 gcm_format,
 				u16 x, u16 y, u16 width, u16 height, const texture_channel_remap_t& remap, bool copy)
 		{
 			if (sized_internal_fmt == GL_NONE)
-				sized_internal_fmt = gl::get_sized_internal_format(gcm_format);
-
-			gl::texture::internal_format ifmt = static_cast<gl::texture::internal_format>(sized_internal_fmt);
-			if (src)
 			{
-				ifmt = src->get_internal_format();
-				switch (ifmt)
-				{
-				case gl::texture::internal_format::depth16:
-				case gl::texture::internal_format::depth24_stencil8:
-				case gl::texture::internal_format::depth32f_stencil8:
-					//HACK! Should use typeless transfer instead
-					sized_internal_fmt = (GLenum)ifmt;
-					break;
-				}
+				sized_internal_fmt = gl::get_sized_internal_format(gcm_format);
 			}
 
 			std::unique_ptr<gl::texture> dst = std::make_unique<gl::viewable_image>(dst_type, width, height, 1, 1, sized_internal_fmt);
 
 			if (copy)
 			{
-				//Empty GL_ERROR
-				glGetError();
+				std::vector<copy_region_descriptor> region =
+				{{
+					src,
+					surface_transform::identity,
+					x, y, 0, 0, 0,
+					width, height, width, height
+				}};
 
-				glCopyImageSubData(src->id(), GL_TEXTURE_2D, 0, x, y, 0,
-					dst->id(), dst_type, 0, 0, 0, 0, width, height, 1);
-
-				//Check for error
-				if (GLenum err = glGetError())
-				{
-					LOG_WARNING(RSX, "Failed to copy image subresource with GL error 0x%X", err);
-					return nullptr;
-				}
+				copy_transfer_regions_impl(cmd, dst.get(), region);
 			}
 
 			std::array<GLenum, 4> swizzle;
-			if (!src || (GLenum)ifmt != sized_internal_fmt)
+			if (!src || (GLenum)src->get_internal_format() != sized_internal_fmt)
 			{
-				if (src)
-				{
-					//Format mismatch
-					warn_once("GL format mismatch (data cast?). Sized ifmt=0x%X vs Src ifmt=0x%X", sized_internal_fmt, (GLenum)ifmt);
-				}
-
-				//Apply base component map onto the new texture if a data cast has been done
+				// Apply base component map onto the new texture if a data cast has been done
 				swizzle = get_component_mapping(gcm_format, rsx::texture_create_flags::default_component_order);
 			}
 			else
@@ -655,7 +569,7 @@ namespace gl
 			auto view = std::make_unique<gl::texture_view>(dst.get(), dst_type, sized_internal_fmt, swizzle.data());
 			auto result = view.get();
 
-			m_temporary_surfaces.push_back({ dst, view });
+			m_temporary_surfaces.emplace_back(dst, view);
 			return result;
 		}
 
@@ -694,37 +608,65 @@ namespace gl
 
 		void copy_transfer_regions_impl(gl::command_context& cmd, gl::texture* dst_image, const std::vector<copy_region_descriptor>& sources) const
 		{
+			const auto dst_bpp = dst_image->pitch() / dst_image->width();
+			const auto dst_aspect = dst_image->aspect();
+
 			for (const auto &slice : sources)
 			{
 				if (!slice.src)
 					continue;
 
-				if (slice.src_w == slice.dst_w && slice.src_h == slice.dst_h)
+				const bool typeless = dst_aspect != slice.src->aspect() ||
+					!formats_are_bitcast_compatible((GLenum)slice.src->get_internal_format(), (GLenum)dst_image->get_internal_format());
+
+				std::unique_ptr<gl::texture> tmp;
+				auto src_image = slice.src;
+				auto src_x = slice.src_x;
+				auto src_y = slice.src_y;
+				auto src_w = slice.src_w;
+				auto src_h = slice.src_h;
+
+				if (auto surface = dynamic_cast<gl::render_target*>(slice.src))
 				{
-					glCopyImageSubData(slice.src->id(), GL_TEXTURE_2D, 0, slice.src_x, slice.src_y, 0,
-						dst_image->id(), (GLenum)dst_image->get_target(), 0, slice.dst_x, slice.dst_y, slice.dst_z, slice.src_w, slice.src_h, 1);
+					surface->transform_samples_to_pixels(src_x, src_w, src_y, src_h);
+				}
+
+				if (UNLIKELY(typeless))
+				{
+					const auto src_bpp = slice.src->pitch() / slice.src->width();
+					const u16 convert_w = u16(slice.src->width() * src_bpp) / dst_bpp;
+					tmp = std::make_unique<texture>(GL_TEXTURE_2D, convert_w, slice.src->height(), 1, 1, (GLenum)dst_image->get_internal_format());
+
+					src_image = tmp.get();
+					src_x = u16(src_x * src_bpp) / dst_bpp;
+					gl::copy_typeless(src_image, slice.src);
+				}
+
+				if (src_w == slice.dst_w && src_h == slice.dst_h)
+				{
+					glCopyImageSubData(src_image->id(), GL_TEXTURE_2D, 0, src_x, src_y, 0,
+						dst_image->id(), (GLenum)dst_image->get_target(), 0, slice.dst_x, slice.dst_y, slice.dst_z, src_w, src_h, 1);
 				}
 				else
 				{
 					verify(HERE), dst_image->get_target() == gl::texture::target::texture2D;
 
-					std::unique_ptr<gl::texture> tmp;
-					auto _dst = dst_image;
-
 					auto _blitter = gl::g_hw_blitter;
-					const areai src_rect = { slice.src_x, slice.src_y, slice.src_x + slice.src_w, slice.src_y + slice.src_h };
+					const areai src_rect = { src_x, src_y, src_x + src_w, src_y + src_h };
 					const areai dst_rect = { slice.dst_x, slice.dst_y, slice.dst_x + slice.dst_w, slice.dst_y + slice.dst_h };
 
-					if (UNLIKELY(slice.src->get_internal_format() != dst_image->get_internal_format()))
+					auto _dst = dst_image;
+					if (UNLIKELY(src_image->get_internal_format() != dst_image->get_internal_format()))
 					{
+						verify(HERE), !typeless;
 						tmp = std::make_unique<texture>(GL_TEXTURE_2D, dst_rect.x2, dst_rect.y2, 1, 1, (GLenum)slice.src->get_internal_format());
 						_dst = tmp.get();
 					}
 
-					_blitter->scale_image(cmd, slice.src, _dst,
+					_blitter->scale_image(cmd, src_image, _dst,
 						src_rect, dst_rect, false, false, {});
 
-					if (tmp)
+					if (_dst != dst_image)
 					{
 						// Data cast comes after scaling
 						glCopyImageSubData(tmp->id(), GL_TEXTURE_2D, 0, slice.dst_x, slice.dst_y, 0,
@@ -773,16 +715,16 @@ namespace gl
 
 	protected:
 
-		gl::texture_view* create_temporary_subresource_view(gl::command_context&, gl::texture** src, u32 gcm_format, u16 x, u16 y, u16 w, u16 h,
+		gl::texture_view* create_temporary_subresource_view(gl::command_context &cmd, gl::texture** src, u32 gcm_format, u16 x, u16 y, u16 w, u16 h,
 				const texture_channel_remap_t& remap_vector) override
 		{
-			return create_temporary_subresource_impl(*src, GL_NONE, GL_TEXTURE_2D, gcm_format, x, y, w, h, remap_vector, true);
+			return create_temporary_subresource_impl(cmd, *src, GL_NONE, GL_TEXTURE_2D, gcm_format, x, y, w, h, remap_vector, true);
 		}
 
-		gl::texture_view* create_temporary_subresource_view(gl::command_context&, gl::texture* src, u32 gcm_format, u16 x, u16 y, u16 w, u16 h,
+		gl::texture_view* create_temporary_subresource_view(gl::command_context &cmd, gl::texture* src, u32 gcm_format, u16 x, u16 y, u16 w, u16 h,
 				const texture_channel_remap_t& remap_vector) override
 		{
-			return create_temporary_subresource_impl(src, (GLenum)src->get_internal_format(),
+			return create_temporary_subresource_impl(cmd, src, (GLenum)src->get_internal_format(),
 					GL_TEXTURE_2D, gcm_format, x, y, w, h, remap_vector, true);
 		}
 
@@ -804,7 +746,7 @@ namespace gl
 			}
 
 			auto result = view.get();
-			m_temporary_surfaces.push_back({ dst_image, view });
+			m_temporary_surfaces.emplace_back(dst_image, view);
 			return result;
 		}
 
@@ -826,7 +768,7 @@ namespace gl
 			}
 
 			auto result = view.get();
-			m_temporary_surfaces.push_back({ dst_image, view });
+			m_temporary_surfaces.emplace_back(dst_image, view);
 			return result;
 		}
 
@@ -834,16 +776,23 @@ namespace gl
 				const texture_channel_remap_t& remap_vector) override
 		{
 			auto _template = get_template_from_collection_impl(sections_to_copy);
-			auto result = create_temporary_subresource_impl(_template, GL_NONE, GL_TEXTURE_2D, gcm_format, 0, 0, width, height, remap_vector, false);
+			auto result = create_temporary_subresource_impl(cmd, _template, GL_NONE, GL_TEXTURE_2D, gcm_format, 0, 0, width, height, remap_vector, false);
 
 			copy_transfer_regions_impl(cmd, result->image(), sections_to_copy);
 			return result;
 		}
 
-		void update_image_contents(gl::command_context&, gl::texture_view* dst, gl::texture* src, u16 width, u16 height) override
+		void update_image_contents(gl::command_context& cmd, gl::texture_view* dst, gl::texture* src, u16 width, u16 height) override
 		{
-			glCopyImageSubData(src->id(), GL_TEXTURE_2D, 0, 0, 0, 0,
-					dst->image()->id(), GL_TEXTURE_2D, 0, 0, 0, 0, width, height, 1);
+			std::vector<copy_region_descriptor> region =
+			{{
+				src,
+				surface_transform::identity,
+				0, 0, 0, 0, 0,
+				width, height, width, height
+			}};
+
+			copy_transfer_regions_impl(cmd, dst->image(), region);
 		}
 
 		cached_texture_section* create_new_texture(gl::command_context&, const utils::address_range &rsx_range, u16 width, u16 height, u16 depth, u16 mipmaps, u16 pitch,
@@ -1054,18 +1003,6 @@ namespace gl
 			{
 				if (result.real_dst_size)
 				{
-					gl::texture::format fmt;
-					if (!result.is_depth)
-					{
-						fmt = dst.format == rsx::blit_engine::transfer_destination_format::a8r8g8b8 ?
-							gl::texture::format::bgra : gl::texture::format::rgba;
-					}
-					else
-					{
-						fmt = dst.format == rsx::blit_engine::transfer_destination_format::a8r8g8b8 ?
-							gl::texture::format::depth_stencil : gl::texture::format::depth;
-					}
-
 					flush_if_cache_miss_likely(cmd, result.to_address_range());
 				}
 

@@ -19,14 +19,14 @@ struct gui_save
 		key = "";
 		name = "";
 		def = QVariant();
-	};
+	}
 
 	gui_save(const QString& k, const QString& n, const QVariant& d)
 	{
 		key = k;
 		name = n;
 		def = d;
-	};
+	}
 };
 
 typedef std::map<std::string, const QString> q_from_char;
@@ -94,7 +94,7 @@ namespace gui
 		default:
 			return "";
 		}
-	};
+	}
 
 	const QSize gl_icon_size_min    = QSize(40, 22);
 	const QSize gl_icon_size_small  = QSize(80, 44);
@@ -108,7 +108,7 @@ namespace gui
 		int size_delta = gl_icon_size_max.width() - gl_icon_size_min.width();
 		int current_delta = current.width() - gl_icon_size_min.width();
 		return gl_max_slider_pos * current_delta / size_delta;
-	};
+	}
 
 	inline q_string_pair Recent_Game(const QString& path, const QString& title)
 	{
@@ -289,7 +289,7 @@ public Q_SLOTS:
 private:
 	QString ComputeSettingsDir();
 	void BackupSettingsToTarget(const QString& friendly_name);
-	void ShowBox(bool confirm, const QString& title, const QString& text, const gui_save& entry, int* result, QWidget* parent);
+	void ShowBox(bool confirm, const QString& title, const QString& text, const gui_save& entry, int* result, QWidget* parent, bool always_on_top);
 
 	QSettings m_settings;
 	QDir m_settingsDir;

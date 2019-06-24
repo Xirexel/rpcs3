@@ -7,7 +7,7 @@
 
 class shared_mutex;
 class cpu_thread;
-class cond_x16;
+class shared_cond;
 
 namespace vm
 {
@@ -98,13 +98,13 @@ namespace vm
 	inline void reservation_update(u32 addr, u32 size, bool lsb = false)
 	{
 		// Update reservation info with new timestamp
-		reservation_acquire(addr, size) += 2;
+		reservation_acquire(addr, size) += 128;
 	}
 
 	// Get reservation sync variable
-	inline cond_x16& reservation_notifier(u32 addr, u32 size)
+	inline shared_cond& reservation_notifier(u32 addr, u32 size)
 	{
-		return *reinterpret_cast<cond_x16*>(g_reservations2 + addr / 128 * 8);
+		return *reinterpret_cast<shared_cond*>(g_reservations2 + addr / 128 * 8);
 	}
 
 	void reservation_lock_internal(atomic_t<u64>&);

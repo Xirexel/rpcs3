@@ -186,7 +186,7 @@ error_code sys_rsx_context_iomap(u32 context_id, u32 io, u32 ea, u32 size, u64 f
 
 	for (u32 addr = ea, end = ea + size; addr < end; addr += 0x100000)
 	{
-		if (!vm::check_addr(addr, 1, vm::page_allocated | vm::page_1m_size))
+		if (!vm::check_addr(addr, 1, vm::page_allocated | (addr < 0x20000000 ? 0 : vm::page_1m_size)))
 		{
 			return CELL_EINVAL;
 		}
@@ -251,13 +251,12 @@ error_code sys_rsx_context_attribute(s32 context_id, u32 package_id, u64 a3, u64
 
 	//hle protection
 	if (render->isHLE)
-		return 0;
+		return CELL_OK;
 
 	auto m_sysrsx = fxm::get<SysRsxConfig>();
 
 	if (!m_sysrsx)
 	{
-		sys_rsx.error("sys_rsx_context_attribute called before sys_rsx_context_allocate: context_id=0x%x, package_id=0x%x, a3=0x%llx, a4=0x%llx, a5=0x%llx, a6=0x%llx)", context_id, package_id, a3, a4, a5, a6);
 		return CELL_EINVAL;
 	}
 
@@ -459,6 +458,7 @@ error_code sys_rsx_context_attribute(s32 context_id, u32 package_id, u64 a3, u64
 
 	case 0xFED: // hack: vblank command
 		// todo: this is wrong and should be 'second' vblank handler and freq, but since currently everything is reported as being 59.94, this should be fine
+		vm::_ref<u32>(render->ctxt_addr + 0x30) = 1;
 		driverInfo.head[a3].vBlankCount++;
 		driverInfo.head[a3].lastSecondVTime = rsxTimeStamp();
 		sys_event_port_send(m_sysrsx->rsx_event_port, 0, (1 << 1), 0);

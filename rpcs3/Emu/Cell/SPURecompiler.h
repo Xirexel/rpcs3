@@ -44,28 +44,25 @@ class spu_runtime
 
 	atomic_t<u64> m_reset_count{0};
 
+	struct func_compare
+	{
+		// Comparison function for SPU programs
+		bool operator()(const std::vector<u32>& lhs, const std::vector<u32>& rhs) const;
+	};
+
 	// All functions
-	std::map<std::vector<u32>, spu_function_t> m_map;
+	std::map<std::vector<u32>, spu_function_t, func_compare> m_map;
+
+	// All functions as PIC
+	std::map<std::basic_string_view<u32>, spu_function_t> m_pic_map;
 
 	// Debug module output location
 	std::string m_cache_path;
 
-	// Trampoline generation workload helper
-	struct work
-	{
-		u32 size;
-		u16 from;
-		u16 level;
-		u8* rel32;
-		std::map<std::vector<u32>, spu_function_t>::iterator beg;
-		std::map<std::vector<u32>, spu_function_t>::iterator end;
-	};
-
 	// Scratch vector
-	static thread_local std::vector<work> workload;
+	std::vector<std::pair<std::basic_string_view<u32>, spu_function_t>> m_flat_list;
 
-	// Scratch vector
-	static thread_local std::vector<u32> addrv;
+public:
 
 	// Trampoline to spu_recompiler_base::dispatch
 	static const spu_function_t tr_dispatch;
@@ -88,10 +85,10 @@ public:
 	void* find(u64 last_reset_count, const std::vector<u32>&);
 
 	// Find existing function
-	spu_function_t find(const se_t<u32, false>* ls, u32 addr) const;
+	spu_function_t find(const u32* ls, u32 addr) const;
 
 	// Generate a patchable trampoline to spu_recompiler_base::branch
-	spu_function_t make_branch_patchpoint(u32 target) const;
+	spu_function_t make_branch_patchpoint() const;
 
 	// reset() arg retriever, for race avoidance (can result in double reset)
 	u64 get_reset_count() const
@@ -107,6 +104,15 @@ public:
 
 	// All dispatchers (array allocated in jit memory)
 	static atomic_t<spu_function_t>* const g_dispatcher;
+
+	// Recompiler entry point
+	static const spu_function_t g_gateway;
+
+	// Longjmp to the end of the gateway function (native CC)
+	static void(*const g_escape)(spu_thread*);
+
+	// Similar to g_escape, but doing tail call to the new function.
+	static void(*const g_tail_escape)(spu_thread*, spu_function_t, u8*);
 
 	// Interpreter entry point
 	static spu_function_t g_interpreter;
@@ -182,6 +188,34 @@ public:
 // SPU Recompiler instance base class
 class spu_recompiler_base
 {
+public:
+	enum : u8
+	{
+		s_reg_lr = 0,
+		s_reg_sp = 1,
+		s_reg_80 = 80,
+		s_reg_127 = 127,
+
+		s_reg_mfc_eal,
+		s_reg_mfc_lsa,
+		s_reg_mfc_tag,
+		s_reg_mfc_size,
+
+		// Max number of registers (for m_regmod)
+		s_reg_max
+	};
+
+	// Classify terminator instructions
+	enum class term_type : unsigned char
+	{
+		br,
+		ret,
+		call,
+		fallthrough,
+		indirect_call,
+		interrupt_call,
+	};
+
 protected:
 	std::shared_ptr<spu_runtime> m_spurt;
 
@@ -194,6 +228,10 @@ protected:
 	// GPR modified by the instruction (-1 = not set)
 	std::array<u8, 0x10000> m_regmod;
 
+	std::array<u8, 0x10000> m_use_ra;
+	std::array<u8, 0x10000> m_use_rb;
+	std::array<u8, 0x10000> m_use_rc;
+
 	// List of possible targets for the instruction (entry shouldn't exist for simple instructions)
 	std::unordered_map<u32, std::basic_string<u32>, value_hash<u32, 2>> m_targets;
 
@@ -203,14 +241,97 @@ protected:
 	// List of function entry points and return points (set after BRSL, BRASL, BISL, BISLED)
 	std::bitset<0x10000> m_entry_info;
 
-	// Compressed address of unique entry point for each instruction
-	std::array<u16, 0x10000> m_entry_map{};
+	// Set after return points and disjoint chunks
+	std::bitset<0x10000> m_ret_info;
+
+	// Basic block information
+	struct block_info
+	{
+		// Address of the chunk entry point (chunk this block belongs to)
+		u32 chunk = 0x40000;
+
+		// Number of instructions
+		u16 size = 0;
+
+		// Internal use flag
+		bool analysed = false;
+
+		// Terminator instruction type
+		term_type terminator;
+
+		// Bit mask of the registers modified in the block
+		std::bitset<s_reg_max> reg_mod{};
+
+		// Set if last modifying instruction produces xfloat
+		std::bitset<s_reg_max> reg_mod_xf{};
+
+		// Set if the initial register value in this block may be xfloat
+		std::bitset<s_reg_max> reg_maybe_xf{};
+
+		// Bit mask of the registers used (before modified)
+		std::bitset<s_reg_max> reg_use{};
+
+		// Bit mask of the trivial (u32 x 4) constant value resulting in this block
+		std::bitset<s_reg_max> reg_const{};
+
+		// Bit mask of register saved onto the stack before use
+		std::bitset<s_reg_max> reg_save_dom{};
+
+		// Address of the function
+		u32 func = 0x40000;
+
+		// Value subtracted from $SP in this block, negative if something funny is done on $SP
+		u32 stack_sub = 0;
+
+		// Constant values associated with reg_const
+		std::array<u32, s_reg_max> reg_val32;
+
+		// Registers loaded from the stack in this block (stack offset)
+		std::array<u32, s_reg_max> reg_load_mod{};
+
+		// Single source of the reg value (dominating block address within the same chunk) or a negative number
+		std::array<u32, s_reg_max> reg_origin, reg_origin_abs;
+
+		// All possible successor blocks
+		std::basic_string<u32> targets;
+
+		// All predeccessor blocks
+		std::basic_string<u32> preds;
+	};
+
+	// Sorted basic block info
+	std::map<u32, block_info> m_bbs;
+
+	// Sorted advanced block (chunk) list
+	std::basic_string<u32> m_chunks;
+
+	// Function information
+	struct func_info
+	{
+		// Size to the end of last basic block
+		u16 size = 0;
+
+		// Determines whether a function is eligible for optimizations
+		bool good = false;
+
+		// Call targets
+		std::basic_string<u32> calls;
+
+		// Register save info (stack offset)
+		std::array<u32, s_reg_max> reg_save_off{};
+	};
+
+	// Sorted function info
+	std::map<u32, func_info> m_funcs;
 
 	std::shared_ptr<spu_cache> m_cache;
 
 private:
 	// For private use
 	std::bitset<0x10000> m_bits;
+
+	// For private use
+	std::vector<u32> workload;
 
 	// Result of analyse(), to avoid copying and allocation
 	std::vector<u32> result;
@@ -224,7 +345,7 @@ public:
 	virtual void init() = 0;
 
 	// Compile function (may fail)
-	virtual bool compile(u64 last_reset_count, const std::vector<u32>&) = 0;
+	virtual spu_function_t compile(u64 last_reset_count, const std::vector<u32>&) = 0;
 
 	// Compile function, handle failure
 	void make_function(const std::vector<u32>&);
@@ -257,20 +378,4 @@ public:
 
 	// Create recompiler instance (LLVM)
 	static std::unique_ptr<spu_recompiler_base> make_llvm_recompiler(u8 magn = 0);
-
-	enum : u8
-	{
-		s_reg_lr = 0,
-		s_reg_sp = 1,
-		s_reg_80 = 80,
-		s_reg_127 = 127,
-
-		s_reg_mfc_eal,
-		s_reg_mfc_lsa,
-		s_reg_mfc_tag,
-		s_reg_mfc_size,
-
-		// Max number of registers (for m_regmod)
-		s_reg_max
-	};
 };

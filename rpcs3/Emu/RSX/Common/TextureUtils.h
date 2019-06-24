@@ -21,16 +21,38 @@ namespace rsx
 		srgb_nonlinear = 1
 	};
 
+	enum surface_usage_flags : u32
+	{
+		unknown = 0,
+		attachment = 1,
+		storage = 2,
+	};
+
+	enum surface_metrics : u32
+	{
+		pixels = 0,
+		samples = 1,
+		bytes = 2
+	};
+
+	enum surface_access : u32
+	{
+		read = 0,
+		write = 1,
+		transfer = 2
+	};
+
 	//Sampled image descriptor
 	struct sampled_image_descriptor_base
 	{
 		texture_upload_context upload_context = texture_upload_context::shader_read;
 		rsx::texture_dimension_extended image_type = texture_dimension_extended::texture_dimension_2d;
 		bool is_depth_texture = false;
+		bool is_cyclic_reference = false;
 		f32 scale_x = 1.f;
 		f32 scale_y = 1.f;
 
-		virtual ~sampled_image_descriptor_base() {}
+		virtual ~sampled_image_descriptor_base() = default;
 		virtual u32 encoded_component_map() const = 0;
 	};
 
@@ -99,6 +121,8 @@ void upload_texture_subresource(gsl::span<gsl::byte> dst_buffer, const rsx_subre
 u8 get_format_block_size_in_bytes(int format);
 u8 get_format_block_size_in_texel(int format);
 u8 get_format_block_size_in_bytes(rsx::surface_color_format format);
+
+u8 get_format_sample_count(rsx::surface_antialiasing antialias);
 
 /**
  * Returns number of texel rows encoded in one pitch-length line of bytes

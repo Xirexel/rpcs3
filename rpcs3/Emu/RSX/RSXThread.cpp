@@ -24,7 +24,7 @@
 #include <thread>
 #include <unordered_set>
 #include <exception>
-#include <fenv.h>
+#include <cfenv>
 
 class GSRender;
 
@@ -325,7 +325,7 @@ namespace rsx
 	{
 		//Endianness is swapped because common upload code expects input in BE
 		//TODO: Implement fast upload path for LE inputs and do away with this
-		element_push_buffer.push_back(se_storage<u32>::swap(index));
+		element_push_buffer.push_back(be_t<u32>{index}.raw());
 	}
 
 	u32 thread::get_push_buffer_index_count() const
@@ -527,20 +527,13 @@ namespace rsx
 		fesetround(FE_TONEAREST);
 
 		// TODO: exit condition
-		while (!Emu.IsStopped())
+		while (true)
 		{
 			// Wait for external pause events
 			if (external_interrupt_lock.load())
 			{
 				external_interrupt_ack.store(true);
 				while (external_interrupt_lock.load()) _mm_pause();
-			}
-
-			// Idle if emulation paused
-			if (Emu.IsPaused())
-			{
-				std::this_thread::sleep_for(1ms);
-				continue;
 			}
 
 			// Note a possible rollback address
@@ -559,6 +552,20 @@ namespace rsx
 
 			// Execute FIFO queue
 			run_FIFO();
+
+			if (!Emu.IsRunning())
+			{
+				// Idle if emulation paused
+				while (Emu.IsPaused())
+				{
+					std::this_thread::sleep_for(1ms);
+				}
+
+				if (Emu.IsStopped())
+				{
+					break;
+				}
+			}
 		}
 	}
 
@@ -586,10 +593,10 @@ namespace rsx
 		float offset_z = rsx::method_registers.viewport_offset_z();
 		float one = 1.f;
 
-		stream_vector(buffer, (u32&)scale_x, 0, 0, (u32&)offset_x);
-		stream_vector((char*)buffer + 16, 0, (u32&)scale_y, 0, (u32&)offset_y);
-		stream_vector((char*)buffer + 32, 0, 0, (u32&)scale_z, (u32&)offset_z);
-		stream_vector((char*)buffer + 48, 0, 0, 0, (u32&)one);
+		stream_vector(buffer, std::bit_cast<u32>(scale_x), 0, 0, std::bit_cast<u32>(offset_x));
+		stream_vector((char*)buffer + 16, 0, std::bit_cast<u32>(scale_y), 0, std::bit_cast<u32>(offset_y));
+		stream_vector((char*)buffer + 32, 0, 0, std::bit_cast<u32>(scale_z), std::bit_cast<u32>(offset_z));
+		stream_vector((char*)buffer + 48, 0, 0, 0, std::bit_cast<u32>(one));
 	}
 
 	void thread::fill_user_clip_data(void *buffer) const
@@ -652,8 +659,8 @@ namespace rsx
 		auto rop_control = rsx::method_registers.alpha_test_enabled()? 1u : 0u;
 
 		if (rsx::method_registers.msaa_alpha_to_coverage_enabled() &&
-			rsx::method_registers.msaa_enabled() &&
-			rsx::method_registers.surface_antialias() != rsx::surface_antialiasing::center_1_sample)
+			rsx::method_registers.surface_antialias() != rsx::surface_antialiasing::center_1_sample &&
+			g_cfg.video.antialiasing_level == msaa_level::none)
 		{
 			// Alpha values generate a coverage mask for order independent blending
 			// Requires hardware AA to work properly (or just fragment sample stage in fragment shaders)
@@ -701,8 +708,8 @@ namespace rsx
 		const f32 wpos_bias = (window_origin == rsx::window_origin::top) ? 0.f : window_height;
 
 		u32 *dst = static_cast<u32*>(buffer);
-		stream_vector(dst, (u32&)fog0, (u32&)fog1, rop_control, (u32&)alpha_ref);
-		stream_vector(dst + 4, alpha_func, fog_mode, (u32&)wpos_scale, (u32&)wpos_bias);
+		stream_vector(dst, std::bit_cast<u32>(fog0), std::bit_cast<u32>(fog1), rop_control, std::bit_cast<u32>(alpha_ref));
+		stream_vector(dst + 4, alpha_func, fog_mode, std::bit_cast<u32>(wpos_scale), std::bit_cast<u32>(wpos_bias));
 	}
 
 	void thread::fill_fragment_texture_parameters(void *buffer, const RSXFragmentProgram &fragment_program)
@@ -764,7 +771,7 @@ namespace rsx
 
 	gsl::span<const gsl::byte> thread::get_raw_index_array(const draw_clause& draw_indexed_clause) const
 	{
-		if (element_push_buffer.size())
+		if (!element_push_buffer.empty())
 		{
 			//Indices provided via immediate mode
 			return{(const gsl::byte*)element_push_buffer.data(), ::narrow<u32>(element_push_buffer.size() * sizeof(u32))};
@@ -816,7 +823,7 @@ namespace rsx
 			if (state.vertex_arrays_info[index].size() > 0)
 			{
 				const rsx::data_array_format_info& info = state.vertex_arrays_info[index];
-				result.push_back(vertex_array_buffer{info.type(), info.size(), info.stride(),
+				result.emplace_back(vertex_array_buffer{info.type(), info.size(), info.stride(),
 					get_raw_vertex_buffer(info, state.vertex_data_base_offset(), state.current_draw_clause), index, true});
 				continue;
 			}
@@ -827,18 +834,18 @@ namespace rsx
 				const u8 element_size = info.size * sizeof(u32);
 
 				gsl::span<const gsl::byte> vertex_src = { (const gsl::byte*)vertex_push_buffers[index].data.data(), vertex_push_buffers[index].vertex_count * element_size };
-				result.push_back(vertex_array_buffer{ info.type, info.size, element_size, vertex_src, index, false });
+				result.emplace_back(vertex_array_buffer{ info.type, info.size, element_size, vertex_src, index, false });
 				continue;
 			}
 
 			if (state.register_vertex_info[index].size > 0)
 			{
 				const rsx::register_vertex_data_info& info = state.register_vertex_info[index];
-				result.push_back(vertex_array_register{info.type, info.size, info.data, index});
+				result.emplace_back(vertex_array_register{info.type, info.size, info.data, index});
 				continue;
 			}
 
-			result.push_back(empty_vertex_array{index});
+			result.emplace_back(empty_vertex_array{index});
 		}
 
 		return result;
@@ -900,12 +907,14 @@ namespace rsx
 
 		if (!in_begin_end && state != FIFO_state::lock_wait)
 		{
-			reader_lock lock(m_mtx_task);
-
-			if (m_invalidated_memory_range.valid())
+			if (atomic_storage<u32>::load(m_invalidated_memory_range.end) != 0)
 			{
-				lock.upgrade();
-				handle_invalidated_memory_range();
+				std::lock_guard lock(m_mtx_task);
+
+				if (m_invalidated_memory_range.valid())
+				{
+					handle_invalidated_memory_range();
+				}
 			}
 		}
 	}
@@ -1024,6 +1033,7 @@ namespace rsx
 		const auto aa_mode = rsx::method_registers.surface_antialias();
 		const u32 aa_factor_u = (aa_mode == rsx::surface_antialiasing::center_1_sample) ? 1 : 2;
 		const u32 aa_factor_v = (aa_mode == rsx::surface_antialiasing::center_1_sample || aa_mode == rsx::surface_antialiasing::diagonal_centered_2_samples) ? 1 : 2;
+		const u8 sample_count = get_format_sample_count(aa_mode);
 
 		const auto depth_texel_size = (layout.depth_format == rsx::surface_depth_format::z16 ? 2 : 4) * aa_factor_u;
 		const auto color_texel_size = get_format_block_size_in_bytes(layout.color_format) * aa_factor_u;
@@ -1204,7 +1214,8 @@ namespace rsx
 			if (layout.color_addresses[i])
 			{
 				if (m_surface_info[i].width != layout.width ||
-					m_surface_info[i].height != layout.height)
+					m_surface_info[i].height != layout.height ||
+					m_surface_info[i].samples != sample_count)
 				{
 					really_changed = true;
 					break;
@@ -1214,7 +1225,8 @@ namespace rsx
 
 		if (!really_changed)
 		{
-			if (layout.zeta_address == m_depth_surface_info.address)
+			if (layout.zeta_address == m_depth_surface_info.address &&
+				sample_count == m_depth_surface_info.samples)
 			{
 				// Same target is reused
 				return layout;
@@ -1235,7 +1247,7 @@ namespace rsx
 		current_vertex_program.output_mask = rsx::method_registers.vertex_attrib_output_mask();
 		current_vertex_program.skip_vertex_input_check = skip_vertex_inputs;
 
-		current_vertex_program.rsx_vertex_inputs.resize(0);
+		current_vertex_program.rsx_vertex_inputs.clear();
 		current_vertex_program.data.reserve(512 * 4);
 		current_vertex_program.jump_table.clear();
 		current_vertex_program.texture_dimensions = 0;
@@ -1528,17 +1540,17 @@ namespace rsx
 					{
 					case CELL_GCM_TEXTURE_X16:
 					{
-						// NOP, a simple way to quickly read DEPTH16 data without shadow comparison
+						// A simple way to quickly read DEPTH16 data without shadow comparison
 						break;
 					}
 					case CELL_GCM_TEXTURE_A8R8G8B8:
 					case CELL_GCM_TEXTURE_D8R8G8B8:
-					case CELL_GCM_TEXTURE_A4R4G4B4: //TODO
-					case CELL_GCM_TEXTURE_R5G6B5:   //TODO
 					{
+						// Reading depth data as XRGB8 is supported with in-shader conversion
+						// TODO: Optionally add support for 16-bit formats (not necessary since type casts are easy with that)
 						u32 remap = tex.remap();
 						result.redirected_textures |= (1 << i);
-						result.texture_scale[i][2] = (f32&)remap;
+						result.texture_scale[i][2] = std::bit_cast<f32>(remap);
 						break;
 					}
 					case CELL_GCM_TEXTURE_DEPTH16:
@@ -1546,11 +1558,14 @@ namespace rsx
 					case CELL_GCM_TEXTURE_DEPTH24_D8:
 					case CELL_GCM_TEXTURE_DEPTH24_D8_FLOAT:
 					{
-						const auto compare_mode = (rsx::comparison_function)tex.zfunc();
+						const auto compare_mode = tex.zfunc();
 						if (result.textures_alpha_kill[i] == 0 &&
 							compare_mode < rsx::comparison_function::always &&
 							compare_mode > rsx::comparison_function::never)
+						{
 							result.shadow_textures |= (1 << i);
+							texture_control |= u32(tex.zfunc()) << 8;
+						}
 						break;
 					}
 					default:
@@ -1586,7 +1601,7 @@ namespace rsx
 #ifdef __APPLE__
 				texture_control |= (sampler_descriptors[i]->encoded_component_map() << 16);
 #endif
-				result.texture_scale[i][3] = (f32&)texture_control;
+				result.texture_scale[i][3] = std::bit_cast<f32>(texture_control);
 			}
 		}
 
@@ -1601,7 +1616,7 @@ namespace rsx
 		}
 	}
 
-	void thread::get_current_fragment_program_legacy(std::function<std::tuple<bool, u16>(u32, fragment_texture&, bool)> get_surface_info)
+	void thread::get_current_fragment_program_legacy(const std::function<std::tuple<bool, u16>(u32, fragment_texture&, bool)>& get_surface_info)
 	{
 		auto &result = current_fragment_program = {};
 
@@ -1643,7 +1658,7 @@ namespace rsx
 				if (tex.alpha_kill_enabled())
 				{
 					//alphakill can be ignored unless a valid comparison function is set
-					const rsx::comparison_function func = (rsx::comparison_function)tex.zfunc();
+					const auto func = tex.zfunc();
 					if (func < rsx::comparison_function::always && func > rsx::comparison_function::never)
 					{
 						result.textures_alpha_kill[i] = 1;
@@ -1691,7 +1706,7 @@ namespace rsx
 						{
 							u32 remap = tex.remap();
 							result.redirected_textures |= (1 << i);
-							result.texture_scale[i][2] = (f32&)remap;
+							result.texture_scale[i][2] = std::bit_cast<f32>(remap);
 							break;
 						}
 						case CELL_GCM_TEXTURE_DEPTH16:
@@ -1699,7 +1714,7 @@ namespace rsx
 						case CELL_GCM_TEXTURE_DEPTH24_D8:
 						case CELL_GCM_TEXTURE_DEPTH24_D8_FLOAT:
 						{
-							const auto compare_mode = (rsx::comparison_function)tex.zfunc();
+							const auto compare_mode = tex.zfunc();
 							if (result.textures_alpha_kill[i] == 0 &&
 								compare_mode < rsx::comparison_function::always &&
 								compare_mode > rsx::comparison_function::never)
@@ -2085,7 +2100,7 @@ namespace rsx
 		}
 	}
 
-	void thread::flip(int buffer)
+	void thread::flip(int buffer, bool emu_flip)
 	{
 		if (!(async_flip_requested & flip_request::any))
 		{
@@ -2126,7 +2141,14 @@ namespace rsx
 				m_flattener.force_disable();
 			}
 
-			async_flip_requested.clear();
+			if (emu_flip)
+			{
+				async_flip_requested.clear(flip_request::emu_requested);
+			}
+			else
+			{
+				async_flip_requested.clear(flip_request::native_ui);
+			}
 		}
 
 		if (!skip_frame)
@@ -2153,11 +2175,11 @@ namespace rsx
 			if (zeta_address)
 			{
 				//Find zeta address in bound zculls
-				for (int i = 0; i < rsx::limits::zculls_count; i++)
+				for (const auto& zcull : zculls)
 				{
-					if (zculls[i].binded)
+					if (zcull.binded)
 					{
-						const u32 rsx_address = rsx::get_address(zculls[i].offset, CELL_GCM_LOCATION_LOCAL);
+						const u32 rsx_address = rsx::get_address(zcull.offset, CELL_GCM_LOCATION_LOCAL);
 						if (rsx_address == zeta_address)
 						{
 							zcull_surface_active = true;
@@ -2453,7 +2475,7 @@ namespace rsx
 
 		int_flip_index++;
 		current_display_buffer = buffer;
-		flip(buffer);
+		flip(buffer, true);
 
 		last_flip_time = get_system_time() - 1000000;
 		flip_status = CELL_GCM_DISPLAY_FLIP_STATUS_DONE;
@@ -2596,7 +2618,7 @@ namespace rsx
 					m_statistics_map[m_statistics_tag_id] = 1;
 
 					verify(HERE), m_pending_writes.front().sink == 0;
-					m_pending_writes.resize(0);
+					m_pending_writes.clear();
 
 					for (auto &query : m_occlusion_query_data)
 					{
@@ -2733,7 +2755,7 @@ namespace rsx
 				if (!has_unclaimed)
 				{
 					verify(HERE), processed == m_pending_writes.size();
-					m_pending_writes.resize(0);
+					m_pending_writes.clear();
 				}
 				else
 				{
@@ -2909,7 +2931,7 @@ namespace rsx
 				}
 				else
 				{
-					m_pending_writes.resize(0);
+					m_pending_writes.clear();
 				}
 
 				ptimer->async_tasks_pending -= processed;

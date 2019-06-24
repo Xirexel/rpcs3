@@ -45,14 +45,15 @@ public:
 		SetDAZandFTZ,
 		SPUBlockSize,
 		SPUCache,
-		SPUVerification,
 		DebugConsoleMode,
+		MaxSPURSThreads,
 
 		// Graphics
 		Renderer,
 		Resolution,
 		AspectRatio,
 		FrameLimit,
+		MSAA,
 		LogShaderPrograms,
 		WriteDepthBuffer,
 		WriteColorBuffers,
@@ -149,14 +150,14 @@ public:
 		QString name;
 		QString old_adapter;
 		QStringList adapters;
-		SettingsType type;
+		SettingsType type = VulkanAdapter;
 		bool supported = true;
 		bool has_adapters = true;
 
-		Render_Info() {};
-		Render_Info(const QString& name) : name(name), has_adapters(false) {};
+		Render_Info() {}
+		Render_Info(const QString& name) : name(name), has_adapters(false) {}
 		Render_Info(const QString& name, const QStringList& adapters, bool supported, SettingsType type)
-			: name(name), adapters(adapters), supported(supported), type(type) {};
+			: name(name), adapters(adapters), supported(supported), type(type) {}
 	};
 
 	struct Render_Creator
@@ -187,7 +188,7 @@ public:
 	~emu_settings();
 
 	/** Connects a combo box with the target settings type*/
-	void EnhanceComboBox(QComboBox* combobox, SettingsType type, bool is_ranged = false, bool use_max = false, int max = 0);
+	void EnhanceComboBox(QComboBox* combobox, SettingsType type, bool is_ranged = false, bool use_max = false, int max = 0, bool sorted = false);
 
 	/** Connects a check box with the target settings type*/
 	void EnhanceCheckBox(QCheckBox* checkbox, SettingsType type);
@@ -254,14 +255,15 @@ private:
 		{ SetDAZandFTZ,             { "Core", "Set DAZ and FTZ"}},
 		{ SPUBlockSize,             { "Core", "SPU Block Size"}},
 		{ SPUCache,                 { "Core", "SPU Cache"}},
-		{ SPUVerification,          { "Core", "SPU Verification"}},
 		{ DebugConsoleMode,         { "Core", "Debug Console Mode"}},
+		{ MaxSPURSThreads,          { "Core", "Max SPURS Threads"}},
 
 		// Graphics Tab
 		{ Renderer,                   { "Video", "Renderer"}},
 		{ Resolution,                 { "Video", "Resolution"}},
 		{ AspectRatio,                { "Video", "Aspect ratio"}},
 		{ FrameLimit,                 { "Video", "Frame limit"}},
+		{ MSAA,                       { "Video", "MSAA"}},
 		{ LogShaderPrograms,          { "Video", "Log shader programs"}},
 		{ WriteDepthBuffer,           { "Video", "Write Depth Buffer"}},
 		{ WriteColorBuffers,          { "Video", "Write Color Buffers"}},

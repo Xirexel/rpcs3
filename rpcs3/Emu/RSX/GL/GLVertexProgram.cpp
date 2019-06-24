@@ -5,6 +5,7 @@
 #include "GLCommonDecompiler.h"
 #include "GLHelpers.h"
 #include "../GCM.h"
+#include "../Common/GLSLCommon.h"
 
 #include <algorithm>
 
@@ -141,10 +142,10 @@ void GLVertexDecompilerThread::insertOutputs(std::stringstream & OS, const std::
 	}
 
 	if (insert_back_diffuse && insert_front_diffuse)
-		outputs_to_declare.push_back("front_diff_color");
+		outputs_to_declare.emplace_back("front_diff_color");
 
 	if (insert_back_specular && insert_front_specular)
-		outputs_to_declare.push_back("front_spec_color");
+		outputs_to_declare.emplace_back("front_spec_color");
 
 	for (auto &name: outputs_to_declare)
 	{
@@ -154,10 +155,22 @@ void GLVertexDecompilerThread::insertOutputs(std::stringstream & OS, const std::
 
 void GLVertexDecompilerThread::insertMainStart(std::stringstream & OS)
 {
-	insert_glsl_legacy_function(OS, glsl::glsl_vertex_program, properties.has_lit_op);
-	glsl::insert_vertex_input_fetch(OS, glsl::glsl_rules_opengl4, gl::get_driver_caps().vendor_INTEL==false);
+	const auto& dev_caps = gl::get_driver_caps();
 
-	std::string parameters = "";
+	glsl::shader_properties properties2;
+	properties2.domain = glsl::glsl_vertex_program;
+	properties2.require_lit_emulation = properties.has_lit_op;
+	// Unused
+	properties2.require_depth_conversion = false;
+	properties2.require_wpos = false;
+	properties2.require_texture_ops = false;
+	properties2.emulate_shadow_compare = false;
+	properties2.low_precision_tests = false;
+
+	insert_glsl_legacy_function(OS, properties2);
+	glsl::insert_vertex_input_fetch(OS, glsl::glsl_rules_opengl4, dev_caps.vendor_INTEL == false);
+
+	std::string parameters;
 	for (int i = 0; i < 16; ++i)
 	{
 		std::string reg_name = "dst_reg" + std::to_string(i);
@@ -174,7 +187,7 @@ void GLVertexDecompilerThread::insertMainStart(std::stringstream & OS)
 	OS << "{\n";
 
 	//Declare temporary registers, ignoring those mapped to outputs
-	for (const ParamType PT : m_parr.params[PF_PARAM_NONE])
+	for (const ParamType &PT : m_parr.params[PF_PARAM_NONE])
 	{
 		for (const ParamItem &PI : PT.items)
 		{
@@ -205,7 +218,7 @@ void GLVertexDecompilerThread::insertMainEnd(std::stringstream & OS)
 	OS << "void main ()\n";
 	OS << "{\n";
 
-	std::string parameters = "";
+	std::string parameters;
 
 	if (ParamType *vec4Types = m_parr.SearchParam(PF_PARAM_OUT, "vec4"))
 	{
@@ -306,7 +319,7 @@ void GLVertexDecompilerThread::insertMainEnd(std::stringstream & OS)
 	//SEE Naruto: UNS
 
 	//NOTE: On GPUs, poor fp32 precision means dividing z by w, then multiplying by w again gives slightly incorrect results
-	//This equation is simplified algebraically to an addition and subreaction which gives more accurate results (Fixes flickering skybox in Dark Souls 2)
+	//This equation is simplified algebraically to an addition and subtraction which gives more accurate results (Fixes flickering skybox in Dark Souls 2)
 	//OS << "	float ndc_z = gl_Position.z / gl_Position.w;\n";
 	//OS << "	ndc_z = (ndc_z * 2.) - 1.;\n";
 	//OS << "	gl_Position.z = ndc_z * gl_Position.w;\n";
@@ -319,9 +332,7 @@ void GLVertexDecompilerThread::Task()
 	m_shader = Decompile();
 }
 
-GLVertexProgram::GLVertexProgram()
-{
-}
+GLVertexProgram::GLVertexProgram() = default;
 
 GLVertexProgram::~GLVertexProgram()
 {
@@ -346,7 +357,8 @@ void GLVertexProgram::Compile()
 	const char* str = shader.c_str();
 	const int strlen = ::narrow<int>(shader.length());
 
-	fs::file(fs::get_cache_dir() + "shaderlog/VertexProgram" + std::to_string(id) + ".glsl", fs::rewrite).write(str);
+	if (g_cfg.video.log_programs)
+		fs::file(fs::get_cache_dir() + "shaderlog/VertexProgram" + std::to_string(id) + ".glsl", fs::rewrite).write(str);
 
 	glShaderSource(id, 1, &str, &strlen);
 	glCompileShader(id);
